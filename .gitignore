@@ -1,0 +1,7 @@
+.private/
+*.xlsx
+*.xls
+*.csv
+*.sqlite*
+*.db
+*.log
