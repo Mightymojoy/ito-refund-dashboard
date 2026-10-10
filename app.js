@@ -72,6 +72,24 @@ function renderChannelGroups(totals){
   $('channel-groups-chart').innerHTML=channelRows.map(r=>`<div class="bar-row"><button class="bar-label shop-link" data-channel="${esc(r.key)}">${esc(r.key)}</button><div class="bar-track"><div class="bar-fill" style="width:${r.rate===null?0:Math.max(0,r.rate/max*100)}%"></div></div><span class="bar-value ${r.rate===null?'pending':''}" title="销售 ${money(r.sales)} 元 / 退款 ${money(r.returns)} 元">${rateText(r)}</span></div>`).join('')||'<div class="chart-empty">没有匹配的渠道数据</div>';
   $('channel-groups-table').innerHTML=channelRows.map(r=>`<tr><td><button class="shop-link" data-channel="${esc(r.key)}">${esc(r.key)}</button><span class="sub">${shopRows.filter(s=>shopChannel(s.key)===r.key).length} 个店铺</span></td><td>${r.bad?'—':money(r.sales)}</td><td>${r.refundBad?'—':money(r.returns)}</td><td>${ratePill(r)}</td><td>${totals.sales>0&&!totals.bad&&!r.bad?pct(r.sales/totals.sales):'—'}</td><td>${int(r.qty)}</td></tr>`).join('')||'<tr class="empty-row"><td colspan="6">没有匹配的渠道数据</td></tr>';
   $('channel-groups-total').innerHTML=`<tr><td>筛选合计</td><td>${totals.bad?'—':money(totals.sales)}</td><td>${totals.refundBad?'—':money(totals.returns)}</td><td>${ratePill(totals)}</td><td>${totals.sales>0&&!totals.bad?'100.00%':'—'}</td><td>${int(totals.qty)}</td></tr>`;
+  renderChannelShopBreakdown();
+}
+function renderChannelShopBreakdown(){
+  const container=$('channel-shop-breakdown');container.hidden=!selected.channel.size;
+  if(container.hidden){container.innerHTML='';return;}
+  const ids=new Map(data.dimensions.shops.map((shop,id)=>[shop,id])),metrics=new Map(shopRows.map(r=>[r.key,r]));
+  const chosenShops=selected.shop.size?new Set([...selected.shop].map(v=>v.startsWith('missing:')?v.slice(8):data.dimensions.shops[+v])):null;
+  container.innerHTML=[...selected.channel].map(channel=>{
+    const configured=channel==='线上自营'?(data.config.channel_rules?.online_owned_shops||[]):[];
+    const shops=[...new Set([...data.dimensions.shops.filter(shop=>data.channels?.[shop]===channel),...configured])].filter(shop=>!chosenShops||chosenShops.has(shop)).map(shop=>({shop,id:ids.get(shop),metrics:metrics.get(ids.get(shop))})).sort((a,b)=>a.metrics&&b.metrics?compareRate(a.metrics,b.metrics):a.metrics?-1:b.metrics?1:a.shop.localeCompare(b.shop,'zh-CN'));
+    const active=shops.filter(s=>s.metrics),max=Math.max(.01,...active.map(s=>s.metrics.rate??0));
+    const bars=shops.map(({shop,id,metrics:r})=>{
+      const text=r?rateText(r):'当前筛选无数据',title=r?`${shop}\n销售金额：${r.bad?'金额异常':money(r.sales)+' 元'}\n退款金额：${r.refundBad?'金额异常':money(r.returns)+' 元'}\n退款率：${text}`:`${shop}\n当前筛选范围没有符合统计口径的订单`;
+      const name=r?`<button class="bar-label shop-link" data-shop="${id}" title="${esc(title)}">${esc(shortShop(shop))}</button>`:`<span class="bar-label" title="${esc(title)}">${esc(shortShop(shop))}</span>`;
+      return `<div class="bar-row channel-shop-row ${r?'':'no-data'}" data-shop-name="${esc(shop)}" data-has-data="${!!r}">${name}<div class="bar-track" title="${esc(title)}"><div class="bar-fill" style="width:${r?.rate!=null?Math.max(0,r.rate/max*100):0}%"></div></div><span class="bar-value ${r?.rate==null?'pending':''}" title="${esc(title)}">${text}</span></div>`;
+    }).join('');
+    return `<section class="channel-shop-section" data-channel-name="${esc(channel)}"><div class="channel-shop-heading"><h3>${esc(channel)} · 店铺退款率</h3><span>${active.length} 家有数据${shops.length>active.length?' · '+(shops.length-active.length)+' 家当前筛选无数据':''}</span></div><p class="channel-shop-note">按退款率降序 · 时间及商品筛选同步生效 · 点击店铺查看商品</p><div class="channel-shop-bars">${bars||'<div class="chart-empty">没有匹配的店铺</div>'}</div></section>`;
+  }).join('');
 }
 function renderTrend(){
   const g=$('granularity').value,metric=$('trend-metric').value,points=grouped(filtered,r=>g==='month'?r[0].slice(0,7):g==='week'?weekInfo(r[0]).start:r[0]).sort((a,b)=>a.key.localeCompare(b.key));
