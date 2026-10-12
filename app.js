@@ -4,6 +4,7 @@ const names={year:'年',month:'月',week:'周',day:'日',channel:'渠道',shop:'
 const pos={shop:1,category:2,series:3,sku:4},keys=Object.keys(names);
 let data=null,selected=Object.fromEntries(keys.map(k=>[k,new Set()])),tab='overview',page=1,productRows=[],filtered=[],shopRows=[],polling=false;
 let seriesRows=[],regionRows=[],compareRows=[],channelRows=[];
+let skuMatrix=null,matrixRows=[],matrixCell=null,matrixMode='quantity';
 const directKeys=new Set(['year','month','week','day','size','color','channel']),weeks=new Map(),regionOpen=new Set();
 let regionInitialized=false;
 const money=v=>new Intl.NumberFormat('zh-CN',{minimumFractionDigits:2,maximumFractionDigits:2}).format(v),int=v=>new Intl.NumberFormat('zh-CN',{maximumFractionDigits:0}).format(v),pct=v=>(v*100).toFixed(2)+'%';
@@ -38,7 +39,7 @@ function renderOptions(k){
   $(`options-${k}`).innerHTML=show.length?show.map(v=>`<label class="filter-option" title="${esc(fullLabel(k,v))}"><input type="checkbox" data-filter="${k}" value="${esc(v)}" ${selected[k].has(v)?'checked':''}><span>${esc(label(k,v))}</span></label>`).join('')+(opts.length>400?'<div class="filter-none">选项较多，请搜索缩小范围</div>':''):'<div class="filter-none">没有匹配选项</div>';
   const count=$(`count-${k}`);count.textContent=selected[k].size?selected[k].size===1?label(k,[...selected[k]][0]):`${selected[k].size} 项`:'全部';count.classList.toggle('selected',!!selected[k].size);
 }
-function sum(rows){const v={sales:0,returns:0,qty:0,lines:0,bad:0,refundBad:0,refundLines:0,skuCount:new Set(rows.map(r=>r[4])).size};for(const r of rows){v.sales+=r[5];v.returns+=r[6];v.qty+=r[7];v.lines+=r[9];v.bad+=r[10];v.refundBad+=r[11]||0;v.refundLines+=r[12]||0;}v.rate=v.sales>0&&!v.bad&&!v.refundBad&&data.metric_ready?v.returns/v.sales:null;return v;}
+function sum(rows){const v={sales:0,returns:0,qty:0,returnQty:0,lines:0,bad:0,refundBad:0,refundLines:0,skuCount:new Set(rows.map(r=>r[4])).size};for(const r of rows){v.sales+=r[5];v.returns+=r[6];v.qty+=r[7];v.returnQty+=r[8]||0;v.lines+=r[9];v.bad+=r[10];v.refundBad+=r[11]||0;v.refundLines+=r[12]||0;}v.rate=v.sales>0&&!v.bad&&!v.refundBad&&data.metric_ready?v.returns/v.sales:null;v.quantityRate=v.qty>0?v.returnQty/v.qty:null;return v;}
 function rateText(r){return r.rate!==null?pct(r.rate):r.bad||r.refundBad?'金额异常':r.sales<=0?'无销售数据':'—';}
 function ratePill(r){return r.rate===null?`<span class="bar-value pending">${rateText(r)}</span>`:`<span class="rate-pill ${r.rate>.25?'high':''}">${pct(r.rate)}</span>`;}
 function grouped(rows,index){const groups=new Map();for(const r of rows){const key=typeof index==='function'?index(r):r[index];if(!groups.has(key))groups.set(key,[]);groups.get(key).push(r);}return [...groups].map(([key,rs])=>({key,...sum(rs)}));}
@@ -146,7 +147,57 @@ function renderComparison(){
   $('compare-table').innerHTML=compareRows.map(r=>`<tr><td>${esc(shortShop(data.dimensions.shops[r.key]))}<span class="sub">${esc(data.dimensions.shops[r.key])}</span></td><td>${r.bad?'—':money(r.sales)}</td><td>${r.refundBad?'—':money(r.returns)}</td><td>${ratePill(r)}</td><td>${int(r.qty)}</td><td>${int(r.refundLines)}</td></tr>`).join('')||'<tr class="empty-row"><td colspan="6">没有匹配的店铺数据</td></tr>';
   $('compare-total').innerHTML=`<tr><td>当前同款合计</td><td>${total.bad?'—':money(total.sales)}</td><td>${total.refundBad?'—':money(total.returns)}</td><td>${ratePill(total)}</td><td>${int(total.qty)}</td><td>${int(total.refundLines)}</td></tr>`;
 }
-function renderActiveAnalysis(){if(tab==='series')renderSeries();else if(tab==='regions')renderRegions();else if(tab==='compare')renderComparison();}
+const matrixQty=v=>new Intl.NumberFormat('zh-CN',{maximumFractionDigits:6}).format(v);
+function matrixRate(r){return matrixMode==='quantity'?r.quantityRate:r.rate;}
+function matrixRateText(r){const rate=matrixRate(r);return rate!==null?pct(rate):matrixMode==='quantity'?'无实发数量':rateText(r);}
+function matrixGroup(rows,kind){return grouped(rows,r=>kind==='cell'?JSON.stringify([attribute(r[4],'color'),attribute(r[4],'size')]):attribute(r[4],kind));}
+function matrixPeriod(rows){const dates=rows.map(r=>r[0]).sort();return dates.length?dates[0]+' 至 '+dates.at(-1):'无符合条件的订单';}
+function matrixTooltip(r,history,scope){
+  const describe=(title,m)=>`${title}\n数量率：${m.quantityRate===null?'无实发数量':pct(m.quantityRate)}（退货 ${matrixQty(m.returnQty)} / 实发 ${matrixQty(m.qty)}）\n金额率：${rateText(m)}（退款 ${m.refundBad?'金额异常':money(m.returns)+' 元'} / 销售 ${m.bad?'金额异常':money(m.sales)+' 元'}）\n${m.skuCount} 个 SKU`;
+  return scope+'\n'+describe('本期（'+skuMatrix.period+'）',r)+(history?'\n\n'+describe('全周期（'+skuMatrix.historyPeriod+'，保留当前渠道、店铺和商品条件）',history):'')+'\n点击查看对应SKU明细';
+}
+function matrixHeat(rate,max){
+  if(rate===null)return 'background:#f6f7fb;color:#97a3b5';
+  const t=Math.max(0,Math.min(1,rate/max)),stops=[[250,247,239],[204,172,94],[174,75,70]],a=t<.5?stops[0]:stops[1],b=t<.5?stops[1]:stops[2],f=t<.5?t*2:(t-.5)*2,rgb=a.map((v,i)=>Math.round(v+(b[i]-v)*f));
+  const light=rgb.map(v=>{const s=v/255;return s<=.04045?s/12.92:((s+.055)/1.055)**2.4;}).reduce((v,s,i)=>v+s*[.2126,.7152,.0722][i],0);
+  return `background:rgb(${rgb.join(',')});color:${light<=.183?'#fff':'#3c3831'}`;
+}
+function matrixCellHTML(r,attrs,history,max,summary=false){
+  if(!r)return '<td class="matrix-no-data"><span>—</span><small>无数据</small></td>';
+  const rate=matrixRate(r),baseline=matrixRate(skuMatrix.total),small=!summary&&r.qty>0&&r.qty<20,high=!summary&&r.qty>=20&&rate!==null&&baseline!==null&&rate>baseline*2;
+  const pair=matrixMode==='quantity'?`${matrixQty(r.returnQty)} / ${matrixQty(r.qty)}`:`${r.refundBad?'金额异常':money(r.returns)} / ${r.bad?'金额异常':money(r.sales)}`;
+  const scope=[skuMatrix.series,attrs.color,attrs.size].filter(v=>v!==undefined).join(' · '),attributes=(attrs.color!==undefined?` data-matrix-color="${esc(attrs.color)}"`:'')+(attrs.size!==undefined?` data-matrix-size="${esc(attrs.size)}"`:''),active=matrixCell&&matrixCell.series===skuMatrix.series&&matrixCell.color===(attrs.color??null)&&matrixCell.size===(attrs.size??null);
+  return `<td class="${summary?'matrix-subtotal':''}"><button class="matrix-cell ${active?'selected':''}" data-matrix-cell="true"${attributes} title="${esc(matrixTooltip(r,history,scope))}" aria-pressed="${!!active}" style="${summary?'':matrixHeat(rate,max)}"><strong>${matrixRateText(r)}${small?'<span class="matrix-tag">样本小</span>':high?'<span class="matrix-tag">异常</span>':''}</strong><small>${pair}</small></button></td>`;
+}
+function renderSKUAnalysis(){
+  const q=$('sku-series-search').value.trim().toLowerCase(),select=$('sku-matrix-series'),old=select.value,choices=seriesRows.filter(r=>data.dimensions.series[r.key].toLowerCase().includes(q)).sort((a,b)=>b.sales-a.sales);
+  select.innerHTML=choices.map(r=>`<option value="${esc(data.dimensions.series[r.key])}">${esc(data.dimensions.series[r.key])}</option>`).join('');if(choices.some(r=>data.dimensions.series[r.key]===old))select.value=old;select.disabled=!choices.length;
+  document.querySelectorAll('[data-matrix-mode]').forEach(b=>{const active=b.dataset.matrixMode===matrixMode;b.classList.toggle('active',active);b.setAttribute('aria-pressed',String(active));});
+  const choice=choices.find(r=>data.dimensions.series[r.key]===select.value);matrixRows=choice?filtered.filter(r=>r[3]===choice.key):[];
+  $('sku-matrix-caption').textContent=(matrixMode==='quantity'?'格内上行：退货入库数量 ÷ 实发数量；下行：退货 / 实发。':'格内上行：退款金额 ÷ 销售净金额；下行：退款 / 销售（元）。')+' 矩阵按所选系列展示，上方指标按左侧筛选汇总。';
+  if(!choice){skuMatrix=null;matrixCell=null;$('sku-matrix-title').textContent='SKU退款率矩阵';$('sku-matrix-note').textContent='当前筛选或系列搜索没有匹配数据，请调整条件。';$('sku-matrix-table').style.minWidth='';$('sku-matrix-table').innerHTML='<tbody><tr class="empty-row"><td>没有符合条件的SKU</td></tr></tbody>';$('sku-matrix-reconciliation').classList.remove('unbalanced');$('sku-matrix-reconciliation').textContent='当前无数据可对账';renderSKUCellDetails();return;}
+  const cells=matrixGroup(matrixRows,'cell'),colorTotals=matrixGroup(matrixRows,'color').sort((a,b)=>b.qty-a.qty||a.key.localeCompare(b.key,'zh-CN')),sizeTotals=matrixGroup(matrixRows,'size').sort((a,b)=>/待确认|未填写/.test(a.key)-/待确认|未填写/.test(b.key)||a.key.localeCompare(b.key,'zh-CN',{numeric:true}));
+  const historyRows=data.facts.filter(r=>r[3]===choice.key&&keys.every(k=>['year','month','week','day'].includes(k)||!selected[k].size||selected[k].has(getValue(r,k)))),historyCells=new Map(matrixGroup(historyRows,'cell').map(r=>[r.key,r])),historyColors=new Map(matrixGroup(historyRows,'color').map(r=>[r.key,r])),historySizes=new Map(matrixGroup(historyRows,'size').map(r=>[r.key,r]));
+  skuMatrix={series:select.value,seriesId:choice.key,mode:matrixMode,total:sum(matrixRows),historyTotal:sum(historyRows),period:matrixPeriod(matrixRows),historyPeriod:matrixPeriod(historyRows),cells:cells.map(r=>({color:JSON.parse(r.key)[0],size:JSON.parse(r.key)[1],...r})),colorTotals,sizeTotals};
+  if(matrixCell&&(matrixCell.series!==skuMatrix.series||!matrixRows.some(r=>(matrixCell.color===null||attribute(r[4],'color')===matrixCell.color)&&(matrixCell.size===null||attribute(r[4],'size')===matrixCell.size))))matrixCell=null;
+  const max=Math.max(.01,...cells.map(r=>matrixRate(r)??0)),byCell=new Map(cells.map(r=>[r.key,r])),baseline=matrixRateText(skuMatrix.total);
+  $('sku-matrix-title').textContent=skuMatrix.series+' · SKU退款率矩阵';$('sku-matrix-note').textContent=`底色越深，${matrixMode==='quantity'?'退货数量率':'退款金额率'}越高；本系列整体 ${baseline}。“异常”：高于本系列整体2倍且实发≥20件；“样本小”：实发不足20件。左侧筛选同步生效，悬停可查看本期与全周期汇总，点击格子查看SKU。`;
+  const header=`<thead><tr><th scope="col">颜色 ＼ 尺寸</th>${sizeTotals.map(r=>`<th scope="col"><button data-matrix-cell="true" data-matrix-size="${esc(r.key)}">${esc(r.key)}</button></th>`).join('')}<th scope="col">小计</th></tr></thead>`;
+  const body='<tbody>'+colorTotals.map(color=>`<tr><th scope="row"><button data-matrix-cell="true" data-matrix-color="${esc(color.key)}">${esc(color.key)}</button></th>${sizeTotals.map(size=>{const key=JSON.stringify([color.key,size.key]);return matrixCellHTML(byCell.get(key),{color:color.key,size:size.key},historyCells.get(key),max);}).join('')}${matrixCellHTML(color,{color:color.key},historyColors.get(color.key),max,true)}</tr>`).join('')+'</tbody>';
+  $('sku-matrix-table').style.minWidth=Math.max(620,(sizeTotals.length+2)*140)+'px';$('sku-matrix-table').innerHTML=header+body+`<tfoot><tr><th scope="row">系列总计</th>${sizeTotals.map(size=>matrixCellHTML(size,{size:size.key},historySizes.get(size.key),max,true)).join('')}${matrixCellHTML(skuMatrix.total,{},skuMatrix.historyTotal,max,true)}</tr></tfoot>`;
+  const total=skuMatrix.total,matrixSum=cells.reduce((a,r)=>({qty:a.qty+r.qty,returnQty:a.returnQty+r.returnQty,sales:a.sales+r.sales,returns:a.returns+r.returns}),{qty:0,returnQty:0,sales:0,returns:0}),difference=Object.fromEntries(Object.keys(matrixSum).map(k=>[k,matrixSum[k]-total[k]])),closed=Math.abs(difference.qty)<1e-6&&Math.abs(difference.returnQty)<1e-6&&Math.abs(difference.sales)<.01&&Math.abs(difference.returns)<.01;skuMatrix.reconciliation={difference,closed};
+  const displayDiff=Object.fromEntries(Object.entries(difference).map(([key,value])=>[key,Math.abs(value)<(key==='qty'||key==='returnQty'?1e-6:.005)?0:value]));
+  $('sku-matrix-reconciliation').classList.toggle('unbalanced',!closed);$('sku-matrix-reconciliation').textContent=`对账（订单付款日期 ${skuMatrix.period}）：退货 ${matrixQty(matrixSum.returnQty)} 件 / 实发 ${matrixQty(matrixSum.qty)} 件；与系列合计差额：退货 ${matrixQty(displayDiff.returnQty)} 件，实发 ${matrixQty(displayDiff.qty)} 件，退款 ${money(displayDiff.returns)} 元，销售 ${money(displayDiff.sales)} 元 · ${closed?'已闭合':'请检查'}`;
+  renderSKUCellDetails();
+}
+function renderSKUCellDetails(){
+  const rows=matrixCell?matrixRows.filter(r=>(matrixCell.color===null||attribute(r[4],'color')===matrixCell.color)&&(matrixCell.size===null||attribute(r[4],'size')===matrixCell.size)):matrixRows,total=sum(rows),products=grouped(rows,4).sort((a,b)=>b.qty-a.qty||b.sales-a.sales);
+  $('sku-cell-title').textContent=matrixCell?[matrixCell.series,matrixCell.color,matrixCell.size].filter(v=>v!==null).join(' · ')+' · SKU明细':'矩阵对应SKU明细';$('sku-cell-caption').textContent=skuMatrix?`${matrixCell?'当前选中格子':'当前系列全部SKU'} · ${products.length} 个SKU · ${skuMatrix.period} · 数量与金额均沿用当前订单匹配范围`:'没有匹配的SKU';
+  const quantity=r=>r.quantityRate===null?'无实发数量':pct(r.quantityRate),metrics=r=>`<td>${matrixQty(r.returnQty)}</td><td>${matrixQty(r.qty)}</td><td>${quantity(r)}</td><td>${r.refundBad?'—':money(r.returns)}</td><td>${r.bad?'—':money(r.sales)}</td><td>${ratePill(r)}</td>`;
+  $('sku-cell-table').innerHTML=products.map(r=>{const p=data.products[r.key];return `<tr><td><span class="meta-code">${esc(p.code)}</span><span class="sub" title="${esc(p.item_code+' · '+p.name)}">${esc(p.item_code+' · '+p.name)}</span></td><td>${esc(attribute(r.key,'color'))}<span class="sub">${esc(attribute(r.key,'size'))}</span></td>${metrics(r)}</tr>`;}).join('')||'<tr class="empty-row"><td colspan="8">没有匹配的SKU明细</td></tr>';
+  $('sku-cell-total').innerHTML=`<tr><td>当前明细合计</td><td>${products.length} 个SKU</td>${metrics(total)}</tr>`;
+}
+function renderActiveAnalysis(){if(tab==='series')renderSeries();else if(tab==='sku')renderSKUAnalysis();else if(tab==='regions')renderRegions();else if(tab==='compare')renderComparison();}
 function renderQuality(){
   $('quality-stats').innerHTML=Object.entries(data.quality.counts).filter(([,v])=>v).map(([k,v])=>`<div class="quality-stat"><span>${esc(k)}</span><strong>${int(v)}</strong></div>`).join('');
   const allocation=data.quality.refund_allocation,agg=data.quality.source_aggregation;
@@ -171,7 +222,7 @@ function renderQuality(){
   $('issue-table').innerHTML=data.quality.details.slice(0,200).map(r=>`<tr><td>${esc(r.type)}</td><td>${esc(r.description)}</td><td class="meta-code">${esc(r.sku||r.order||'—')}</td></tr>`).join('')||'<tr class="empty-row"><td colspan="3">逐笔待检查记录请在本地看板核查</td></tr>';
   const count=Object.values(data.quality.counts).reduce((a,b)=>a+b,0);$('quality-badge').textContent=count?int(count):'';
 }
-function showTab(t){tab=t;document.querySelectorAll('[data-tab]').forEach(e=>e.classList.toggle('active',e.dataset.tab===t));for(const k of ['overview','series','regions','compare','products','quality'])$(`${k}-view`).hidden=k!==t;if(data)renderActiveAnalysis();}
+function showTab(t){tab=t;document.querySelectorAll('[data-tab]').forEach(e=>e.classList.toggle('active',e.dataset.tab===t));for(const k of ['overview','series','sku','regions','compare','products','quality'])$(`${k}-view`).hidden=k!==t;if(data)renderActiveAnalysis();}
 async function load(manual=false){
   if(polling)return;polling=true;
   try{
@@ -187,8 +238,15 @@ async function load(manual=false){
   finally{polling=false;}
 }
 function exportCSV(){
+  if(tab==='sku'){exportSKUMatrixCSV();return;}
   if(!data)return;const rows=productRows.map(r=>{const p=data.products[r.key];return [p.code,p.item_code,p.name,data.dimensions.categories[p.category],data.dimensions.series[p.series],r.bad?'金额异常':r.sales.toFixed(2),r.refundBad?'金额异常':r.returns.toFixed(2),rateText(r),r.qty,attribute(r.key,'size'),attribute(r.key,'color')];});
   const quote=v=>'"'+String(v??'').replaceAll('"','""')+'"',csv='\ufeff'+[['商家编码','货品编号','商品名称','品类','系列','销售金额','退款金额','退款率','实发件数','尺寸','颜色'],...rows].map(r=>r.map(quote).join(',')).join('\r\n');const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([csv],{type:'text/csv;charset=utf-8'}));a.download='退款率分析_'+new Date().toISOString().slice(0,10)+'.csv';a.click();setTimeout(()=>URL.revokeObjectURL(a.href),1000);toast('已导出当前筛选的商品明细');
+}
+function exportSKUMatrixCSV(){
+  if(!skuMatrix){toast('当前矩阵没有可导出的数据');return;}
+  const rows=matrixCell?matrixRows.filter(r=>(matrixCell.color===null||attribute(r[4],'color')===matrixCell.color)&&(matrixCell.size===null||attribute(r[4],'size')===matrixCell.size)):matrixRows,header=['系列','SKU','货品编号','商品名称','颜色','尺寸','退货数量','实发数量','数量率','退款金额（元）','销售金额（元）','金额率'];
+  const values=grouped(rows,4).map(r=>{const p=data.products[r.key];return [skuMatrix.series,p.code,p.item_code,p.name,attribute(r.key,'color'),attribute(r.key,'size'),r.returnQty,r.qty,r.quantityRate===null?'无实发数量':pct(r.quantityRate),r.refundBad?'金额异常':r.returns.toFixed(2),r.bad?'金额异常':r.sales.toFixed(2),rateText(r)];}),quote=v=>'"'+String(v??'').replaceAll('"','""')+'"',csv='\ufeff'+[header,...values].map(r=>r.map(quote).join(',')).join('\r\n'),url=URL.createObjectURL(new Blob([csv],{type:'text/csv;charset=utf-8'})),a=document.createElement('a');
+  a.href=url;a.download='SKU退款分析_'+new Date().toISOString().slice(0,10)+'.csv';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);toast('已导出当前矩阵对应的SKU明细');
 }
 function exportMissingReturns(){
   const records=data.quality.source_completeness?.missing_return_records||[];
@@ -200,10 +258,11 @@ function exportMissingReturns(){
 setupFilters();$('reset').onclick=()=>{keys.forEach(k=>{selected[k].clear();document.querySelector(`[data-search="${k}"]`).value='';});page=1;render();};$('reload').onclick=()=>load(true);$('export').onclick=exportCSV;
 $('selection').onclick=e=>{const k=e.target.dataset.remove;if(k){selected[k].clear();page=1;render();}};
 document.querySelectorAll('[data-tab]').forEach(e=>e.onclick=()=>showTab(e.dataset.tab));
-document.addEventListener('click',e=>{const open=e.target.closest('[data-open-tab]');if(open){showTab(open.dataset.openTab);return;}const channel=e.target.closest('[data-channel]');if(channel){selected.channel=new Set([channel.dataset.channel]);page=1;render();return;}const group=e.target.closest('[data-group-filter]');if(group){selected[group.dataset.groupFilter]=new Set([group.dataset.groupId]);page=1;showTab('products');render();return;}const b=e.target.closest('[data-shop]');if(b){selected.shop=new Set([String(b.dataset.shop)]);page=1;showTab('products');render();}});
+document.addEventListener('click',e=>{const mode=e.target.closest('[data-matrix-mode]');if(mode){matrixMode=mode.dataset.matrixMode;renderSKUAnalysis();return;}const cell=e.target.closest('[data-matrix-cell]');if(cell&&skuMatrix){matrixCell={series:skuMatrix.series,color:cell.dataset.matrixColor??null,size:cell.dataset.matrixSize??null};renderSKUAnalysis();return;}const resetCell=e.target.closest('[data-matrix-reset]');if(resetCell){matrixCell=null;renderSKUAnalysis();return;}const open=e.target.closest('[data-open-tab]');if(open){showTab(open.dataset.openTab);return;}const channel=e.target.closest('[data-channel]');if(channel){selected.channel=new Set([channel.dataset.channel]);page=1;render();return;}const group=e.target.closest('[data-group-filter]');if(group){selected[group.dataset.groupFilter]=new Set([group.dataset.groupId]);page=1;showTab('products');render();return;}const b=e.target.closest('[data-shop]');if(b){selected.shop=new Set([String(b.dataset.shop)]);page=1;showTab('products');render();}});
 $('granularity').onchange=renderTrend;$('trend-metric').onchange=renderTrend;$('product-search').oninput=()=>{page=1;renderProducts();};$('product-sort').onchange=()=>{page=1;renderProducts();};$('prev').onclick=()=>{page--;renderProducts();};$('next').onclick=()=>{page++;renderProducts();};
 $('series-search').oninput=renderSeries;$('series-sort').onchange=renderSeries;$('region-sort').onchange=renderRegions;
 $('region-tree').addEventListener('toggle',e=>{const k=e.target.dataset.regionKey;if(k)e.target.open?regionOpen.add(k):regionOpen.delete(k);},true);
 $('compare-mode').onchange=()=>{$('compare-search').value='';renderComparison();};$('compare-search').oninput=renderComparison;$('compare-product').onchange=renderComparison;
+$('sku-series-search').oninput=renderSKUAnalysis;$('sku-matrix-series').onchange=()=>{matrixCell=null;renderSKUAnalysis();};
 load();setInterval(()=>{if(document.visibilityState==='visible')load();},60000);document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='visible')load();});
-window.dashboardState=()=>({data,selected,filtered,totals:filtered.length?sum(filtered):null,tab,productRows,shopRows,seriesRows,regionRows,compareRows,channelRows});
+window.dashboardState=()=>({data,selected,filtered,totals:filtered.length?sum(filtered):null,tab,productRows,shopRows,seriesRows,regionRows,compareRows,channelRows,skuMatrix,matrixCell});
