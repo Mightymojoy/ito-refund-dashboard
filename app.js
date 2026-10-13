@@ -8,6 +8,8 @@ let skuMatrix=null,matrixRows=[],matrixCell=null,matrixMode='quantity';
 let skuMatrices=[],matrixSeriesSelection=new Set(),matrixSeriesInitialized=false;
 const directKeys=new Set(['year','month','week','day','size','color','channel']),weeks=new Map(),regionOpen=new Set();
 let regionInitialized=false;
+let basketAnalysis=null,basketPair=['行李箱','行李箱'],basketPage=1,basketVisibleRows=[];
+const basketProductFilters=['category','series','sku','size','color'];
 const money=v=>new Intl.NumberFormat('zh-CN',{minimumFractionDigits:2,maximumFractionDigits:2}).format(v),int=v=>new Intl.NumberFormat('zh-CN',{maximumFractionDigits:0}).format(v),pct=v=>(v*100).toFixed(2)+'%';
 const amount=v=>v>=100000000?(v/100000000).toFixed(2)+'<small>亿元</small>':v>=10000?(v/10000).toFixed(2)+'<small>万元</small>':money(v)+'<small>元</small>';
 function shortShop(s){const parts=s.split('_');return parts.findLast?.(p=>/店|商城|小程序/.test(p))||parts.at(-1)||s;}
@@ -211,7 +213,79 @@ function renderSKUCellDetails(){
   $('sku-cell-table').innerHTML=products.map(r=>{const p=data.products[r.key];return `<tr><td><span class="meta-code">${esc(p.code)}</span><span class="sub">${esc(data.dimensions.series[p.series])}</span><span class="sub" title="${esc(p.item_code+' · '+p.name)}">${esc(p.item_code+' · '+p.name)}</span></td><td>${esc(attribute(r.key,'color'))}<span class="sub">${esc(attribute(r.key,'size'))}</span></td>${metrics(r)}</tr>`;}).join('')||'<tr class="empty-row"><td colspan="8">没有匹配的SKU明细</td></tr>';
   $('sku-cell-total').innerHTML=`<tr><td>当前明细合计</td><td>${products.length} 个SKU</td>${metrics(total)}</tr>`;
 }
-function renderActiveAnalysis(){if(tab==='series')renderSeries();else if(tab==='sku')renderSKUAnalysis();else if(tab==='regions')renderRegions();else if(tab==='compare')renderComparison();}
+function basketScopeMatch(r){return ['year','month','week','day','channel','shop'].every(k=>!selected[k].size||selected[k].has(getValue(r,k)));}
+function basketAnchorMatch(sku,date,shop){const p=data.products[sku],r=[date,shop,p.category,p.series,sku];return basketProductFilters.every(k=>!selected[k].size||selected[k].has(getValue(r,k)));}
+function basketType(sku){return data.basket_analysis.types[data.basket_analysis.product_types[sku]];}
+function computeBasketAnalysis(){
+  const model=data.basket_analysis;if(!model)return null;
+  const base=[],anchorTypes=new Set(),pairChoices=new Map(),active=basketProductFilters.some(k=>selected[k].size);
+  const core=[['行李箱','行李箱'],['行李箱','双肩包'],['行李箱','箱套'],['双肩包','双肩包']];
+  core.forEach(pair=>pairChoices.set(JSON.stringify(pair),pair));
+  pairChoices.set(JSON.stringify(basketPair),basketPair);
+  let orders=0,multiOrders=0,units=0;
+  for(const r of model.baskets){
+    if(!basketScopeMatch(r))continue;
+    const anchors=r[3].filter(([sku])=>basketAnchorMatch(sku,r[0],r[1]));if(!anchors.length)continue;
+    const kindUnits=new Map();for(const [sku,qty] of r[3]){const kind=basketType(sku);kindUnits.set(kind,(kindUnits.get(kind)||0)+qty);}
+    anchors.forEach(([sku])=>anchorTypes.add(basketType(sku)));
+    const quantity=r[3].reduce((total,[,qty])=>total+qty,0);orders+=r[2];units+=quantity*r[2];if(quantity>=2)multiOrders+=r[2];
+    base.push({date:r[0],shop:r[1],weight:r[2],items:r[3],anchors,kindUnits});
+    const kinds=[...kindUnits.keys()].sort((a,b)=>model.types.indexOf(a)-model.types.indexOf(b));
+    kinds.forEach((left,i)=>kinds.slice(i).forEach(right=>{if(left!==right||kindUnits.get(left)>=2)pairChoices.set(JSON.stringify([left,right]),[left,right]);}));
+  }
+  const combos=[...pairChoices].map(([key,[left,right]])=>{
+    const primary=active&&!anchorTypes.has(left)&&anchorTypes.has(right)?right:left,target=primary===left?right:left;
+    let denominator=0,joint=0;
+    for(const order of base){
+      if(!order.anchors.some(([sku])=>basketType(sku)===primary))continue;
+      denominator+=order.weight;
+      if(left===right?order.kindUnits.get(left)>=2:(order.kindUnits.get(left)>0&&order.kindUnits.get(right)>0))joint+=order.weight;
+    }
+    return {key,left,right,primary,target,denominator,joint,rate:denominator?joint/denominator:null,share:orders?joint/orders:null};
+  }).filter(c=>c.joint>0||core.some(pair=>JSON.stringify(pair)===c.key)||c.key===JSON.stringify(basketPair));
+  const combo=combos.find(c=>c.left===basketPair[0]&&c.right===basketPair[1])||combos[0],skuCounts=new Map(),pairs=new Map();
+  if(combo)for(const order of base){
+    const primaries=order.anchors.filter(([sku])=>basketType(sku)===combo.primary),targets=order.items.filter(([sku])=>basketType(sku)===combo.target);
+    for(const [sku,qty] of primaries){
+      skuCounts.set(sku,(skuCounts.get(sku)||0)+order.weight);
+      for(const [target,targetQty] of targets){
+        if(sku===target&&qty<2)continue;
+        const key=sku+':'+target;if(!pairs.has(key))pairs.set(key,{primary:sku,target,joint:0});pairs.get(key).joint+=order.weight;
+      }
+    }
+  }
+  const rows=[...pairs.values()].map(row=>({...row,denominator:skuCounts.get(row.primary),rate:row.joint/skuCounts.get(row.primary)}));
+  return {orders,multiOrders,units,rate:orders?multiOrders/orders:null,combos,combo,rows,signatureRows:base.length};
+}
+function basketProductLabel(sku){const p=data.products[sku];return `${p.code} ${p.item_code} ${p.name} ${data.dimensions.series[p.series]} ${attribute(sku,'color')} ${attribute(sku,'size')}`;}
+function renderBasketDetails(){
+  const q=$('basket-sku-search').value.trim().toLowerCase(),sort=$('basket-sku-sort').value;
+  basketVisibleRows=(basketAnalysis?.rows||[]).filter(r=>(basketProductLabel(r.primary)+' '+basketProductLabel(r.target)).toLowerCase().includes(q)).sort((a,b)=>sort==='rate'?b.rate-a.rate||b.joint-a.joint:b.joint-a.joint||b.rate-a.rate);
+  const pages=Math.max(1,Math.ceil(basketVisibleRows.length/40));basketPage=Math.max(1,Math.min(basketPage,pages));
+  const productCell=sku=>{const p=data.products[sku];return `<span class="meta-code">${esc(p.code)}</span><span class="sub">${esc(data.dimensions.series[p.series])}</span><span class="sub" title="${esc(p.name)}">${esc(p.name)}</span><span class="sub">${esc(attribute(sku,'color'))} · ${esc(attribute(sku,'size'))}</span>`;};
+  $('basket-sku-table').innerHTML=basketVisibleRows.slice((basketPage-1)*40,basketPage*40).map(r=>`<tr><td>${productCell(r.primary)}</td><td>${productCell(r.target)}${r.primary===r.target?'<span class="sub">同SKU购买两件及以上</span>':''}</td><td>${int(r.joint)}</td><td>${int(r.denominator)}</td><td><span class="rate-pill">${pct(r.rate)}</span></td></tr>`).join('')||'<tr class="empty-row"><td colspan="5">当前组合没有匹配的SKU搭配；可选择其他组合、系列或调整店铺与时间</td></tr>';
+  $('basket-sku-count').textContent=`${int(basketVisibleRows.length)} 组SKU搭配 · 每页40组`;$('basket-page').textContent=`${basketPage} / ${pages}`;$('basket-prev').disabled=basketPage<=1;$('basket-next').disabled=basketPage>=pages;
+}
+function renderBasketAnalysis(){
+  basketAnalysis=computeBasketAnalysis();
+  if(!basketAnalysis){$('basket-scope').textContent='同购数据尚未生成，请运行刷新数据脚本后重新加载。';$('basket-kpis').innerHTML='';$('basket-combos').innerHTML='';$('basket-combo-table').innerHTML='';renderBasketDetails();return;}
+  const r=basketAnalysis,model=data.basket_analysis,filters=basketProductFilters.filter(k=>selected[k].size).map(k=>names[k]+'：'+[...selected[k]].map(v=>label(k,v)).join('、'));
+  $('basket-scope').textContent='按付款日期、渠道及店铺筛选。同店铺＋原始订单号去重，排除赠品、无效或非正销售净额、非正实发数量及虚拟卡券。'+(filters.length?'主商品条件：'+filters.join('；')+'。保留这些订单中的全部有效搭配商品。':'未指定主商品，展示当前店铺与时间内的全部有效购买订单。');
+  $('basket-kpis').innerHTML=[['有效购买订单',int(r.orders),'当前范围的去重订单数'],['多件购买订单',int(r.multiOrders),'同单有效购买商品达到两件'],['多件订单连带率',r.rate===null?'—':pct(r.rate),'多件购买订单 ÷ 有效购买订单'],['每单购买件数',r.orders?(r.units/r.orders).toFixed(2):'—','有效实发商品数量 ÷ 订单数']].map(([title,value,foot])=>`<article><span>${title}</span><strong>${value}</strong><small>${foot}</small></article>`).join('');
+  const button=(c,card=false)=>`<button class="${card?'basket-combo-card':'shop-link'} ${r.combo?.key===c.key?'selected':''}" data-basket-left="${esc(c.left)}" data-basket-right="${esc(c.right)}" aria-pressed="${r.combo?.key===c.key}"><span>${esc(c.left+'＋'+c.right)}</span>${card?`<strong>${c.rate===null?'—':pct(c.rate)}</strong><small>${int(c.joint)} 同购订单 / ${int(c.denominator)} ${esc(c.primary)}订单</small>`:''}</button>`;
+  $('basket-combos').innerHTML=r.combos.slice(0,4).map(c=>button(c,true)).join('');
+  $('basket-combo-table').innerHTML=[...r.combos].sort((a,b)=>b.joint-a.joint).map(c=>`<tr><td>${button(c)}</td><td>${esc(c.primary)}</td><td>${int(c.joint)}</td><td>${int(c.denominator)}</td><td>${c.rate===null?'无主品类订单':pct(c.rate)}</td><td>${c.share===null?'—':pct(c.share)}</td></tr>`).join('');$('basket-combo-count').textContent=r.combos.length+' 种搭配';
+  const quality=model.quality;$('basket-quality').textContent=`全量来源处理：排除赠品 ${int(quality['排除赠品行']||0)} 行，原始订单号缺失 ${int(quality['原始订单号缺失行']||0)} 行，付款日期不唯一 ${int(quality['排除付款日期不唯一订单']||0)} 单。BACKPACK/双肩/背包归双肩包，箱套按商品名称或系列识别。同类搭配要求同单至少两件，包括同SKU多件。`;
+  $('basket-sku-title').textContent=(r.combo?r.combo.left+'＋'+r.combo.right:'当前组合')+' · SKU连带分析';$('basket-sku-caption').textContent=`主SKU→搭配SKU连带率＝同时购买两者的订单数÷购买主SKU的订单数。当前主品类：${r.combo?.primary||'—'}；右上角可导出当前搜索结果。`;
+  renderBasketDetails();
+}
+function exportBasketCSV(){
+  if(!basketAnalysis){toast('请先刷新并生成同购数据');return;}
+  const header=['主SKU','主货品编号','主商品名称','主系列','主颜色','主尺寸','搭配SKU','搭配货品编号','搭配商品名称','搭配系列','搭配颜色','搭配尺寸','同购订单数','主SKU购买订单数','连带率','品类组合'];
+  const values=basketVisibleRows.map(r=>{const a=data.products[r.primary],b=data.products[r.target];return [a.code,a.item_code,a.name,data.dimensions.series[a.series],attribute(r.primary,'color'),attribute(r.primary,'size'),b.code,b.item_code,b.name,data.dimensions.series[b.series],attribute(r.target,'color'),attribute(r.target,'size'),r.joint,r.denominator,pct(r.rate),basketAnalysis.combo.left+'＋'+basketAnalysis.combo.right];});
+  const quote=v=>'"'+String(v??'').replaceAll('"','""')+'"',csv='\ufeff'+[header,...values].map(row=>row.map(quote).join(',')).join('\r\n'),url=URL.createObjectURL(new Blob([csv],{type:'text/csv;charset=utf-8'})),a=document.createElement('a');a.href=url;a.download='SKU连带分析_'+new Date().toISOString().slice(0,10)+'.csv';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);toast('已导出当前组合的SKU连带分析');
+}
+function renderActiveAnalysis(){if(tab==='series')renderSeries();else if(tab==='sku')renderSKUAnalysis();else if(tab==='regions')renderRegions();else if(tab==='compare')renderComparison();else if(tab==='basket')renderBasketAnalysis();}
 function renderQuality(){
   $('quality-stats').innerHTML=Object.entries(data.quality.counts).filter(([,v])=>v).map(([k,v])=>`<div class="quality-stat"><span>${esc(k)}</span><strong>${int(v)}</strong></div>`).join('');
   const allocation=data.quality.refund_allocation,agg=data.quality.source_aggregation;
@@ -236,7 +310,7 @@ function renderQuality(){
   $('issue-table').innerHTML=data.quality.details.slice(0,200).map(r=>`<tr><td>${esc(r.type)}</td><td>${esc(r.description)}</td><td class="meta-code">${esc(r.sku||r.order||'—')}</td></tr>`).join('')||'<tr class="empty-row"><td colspan="3">逐笔待检查记录请在本地看板核查</td></tr>';
   const count=Object.values(data.quality.counts).reduce((a,b)=>a+b,0);$('quality-badge').textContent=count?int(count):'';
 }
-function showTab(t){tab=t;document.querySelectorAll('[data-tab]').forEach(e=>e.classList.toggle('active',e.dataset.tab===t));for(const k of ['overview','series','sku','regions','compare','products','quality'])$(`${k}-view`).hidden=k!==t;if(data)renderActiveAnalysis();}
+function showTab(t){tab=t;document.querySelectorAll('[data-tab]').forEach(e=>e.classList.toggle('active',e.dataset.tab===t));for(const k of ['overview','series','sku','regions','compare','basket','products','quality'])$(`${k}-view`).hidden=k!==t;document.querySelector('.kpis').hidden=t==='basket';$('notices').hidden=t==='basket';document.querySelector('.scope-tag').innerHTML=t==='basket'?'同一原始订单内购买 <span>·</span> 赠品不计入':'退款归回订单付款日期 <span>·</span> 换货不计入';if(data)renderActiveAnalysis();}
 async function load(manual=false){
   if(polling)return;polling=true;
   try{
@@ -253,6 +327,7 @@ async function load(manual=false){
 }
 function exportCSV(){
   if(tab==='sku'){exportSKUMatrixCSV();return;}
+  if(tab==='basket'){exportBasketCSV();return;}
   if(!data)return;const rows=productRows.map(r=>{const p=data.products[r.key];return [p.code,p.item_code,p.name,data.dimensions.categories[p.category],data.dimensions.series[p.series],r.bad?'金额异常':r.sales.toFixed(2),r.refundBad?'金额异常':r.returns.toFixed(2),rateText(r),r.qty,attribute(r.key,'size'),attribute(r.key,'color')];});
   const quote=v=>'"'+String(v??'').replaceAll('"','""')+'"',csv='\ufeff'+[['商家编码','货品编号','商品名称','品类','系列','销售金额','退款金额','退款率','实发件数','尺寸','颜色'],...rows].map(r=>r.map(quote).join(',')).join('\r\n');const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([csv],{type:'text/csv;charset=utf-8'}));a.download='退款率分析_'+new Date().toISOString().slice(0,10)+'.csv';a.click();setTimeout(()=>URL.revokeObjectURL(a.href),1000);toast('已导出当前筛选的商品明细');
 }
@@ -278,6 +353,9 @@ $('series-search').oninput=renderSeries;$('series-sort').onchange=renderSeries;$
 $('region-tree').addEventListener('toggle',e=>{const k=e.target.dataset.regionKey;if(k)e.target.open?regionOpen.add(k):regionOpen.delete(k);},true);
 $('compare-mode').onchange=()=>{$('compare-search').value='';renderComparison();};$('compare-search').oninput=renderComparison;$('compare-product').onchange=renderComparison;
 $('sku-series-search').oninput=()=>{renderMatrixSeriesPicker();$('sku-series-picker').open=true;};$('sku-series-options').onchange=e=>{const input=e.target.closest('[data-matrix-series-option]');if(!input)return;input.checked?matrixSeriesSelection.add(input.value):matrixSeriesSelection.delete(input.value);matrixSeriesInitialized=true;matrixCell=null;renderSKUAnalysis();};
+$('basket-sku-search').oninput=()=>{basketPage=1;renderBasketDetails();};$('basket-sku-sort').onchange=()=>{basketPage=1;renderBasketDetails();};$('basket-prev').onclick=()=>{basketPage--;renderBasketDetails();};$('basket-next').onclick=()=>{basketPage++;renderBasketDetails();};
+$('basket-reset').onclick=()=>{basketPair=['行李箱','行李箱'];basketPage=1;$('basket-sku-search').value='';$('basket-sku-sort').value='orders';renderBasketAnalysis();};
+document.addEventListener('click',e=>{const button=e.target.closest('[data-basket-left]');if(button){basketPair=[button.dataset.basketLeft,button.dataset.basketRight];basketPage=1;renderBasketAnalysis();}});
 document.addEventListener('keydown',e=>{if(e.key==='Escape'&&$('sku-series-picker').open){$('sku-series-picker').open=false;$('sku-series-picker').querySelector('summary').focus();}});
 load();setInterval(()=>{if(document.visibilityState==='visible')load();},60000);document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='visible')load();});
-window.dashboardState=()=>({data,selected,filtered,totals:filtered.length?sum(filtered):null,tab,productRows,shopRows,seriesRows,regionRows,compareRows,channelRows,skuMatrix,skuMatrices,matrixCell,matrixSeriesSelection});
+window.dashboardState=()=>({data,selected,filtered,totals:filtered.length?sum(filtered):null,tab,productRows,shopRows,seriesRows,regionRows,compareRows,channelRows,skuMatrix,skuMatrices,matrixCell,matrixSeriesSelection,basketAnalysis,basketPair,basketVisibleRows});
