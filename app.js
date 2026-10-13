@@ -10,6 +10,7 @@ const directKeys=new Set(['year','month','week','day','size','color','channel'])
 let regionInitialized=false;
 let basketAnalysis=null,basketPair=['行李箱','行李箱'],basketPage=1,basketVisibleRows=[];
 const basketProductFilters=['category','series','sku','size','color'];
+const basketCorePairs=[['行李箱','行李箱'],['行李箱','双肩包'],['行李箱','箱套'],['双肩包','双肩包']];
 const money=v=>new Intl.NumberFormat('zh-CN',{minimumFractionDigits:2,maximumFractionDigits:2}).format(v),int=v=>new Intl.NumberFormat('zh-CN',{maximumFractionDigits:0}).format(v),pct=v=>(v*100).toFixed(2)+'%';
 const amount=v=>v>=100000000?(v/100000000).toFixed(2)+'<small>亿元</small>':v>=10000?(v/10000).toFixed(2)+'<small>万元</small>':money(v)+'<small>元</small>';
 function shortShop(s){const parts=s.split('_');return parts.findLast?.(p=>/店|商城|小程序/.test(p))||parts.at(-1)||s;}
@@ -219,7 +220,7 @@ function basketType(sku){return data.basket_analysis.types[data.basket_analysis.
 function computeBasketAnalysis(){
   const model=data.basket_analysis;if(!model)return null;
   const base=[],anchorTypes=new Set(),pairChoices=new Map(),active=basketProductFilters.some(k=>selected[k].size);
-  const core=[['行李箱','行李箱'],['行李箱','双肩包'],['行李箱','箱套'],['双肩包','双肩包']];
+  const core=basketCorePairs;
   core.forEach(pair=>pairChoices.set(JSON.stringify(pair),pair));
   pairChoices.set(JSON.stringify(basketPair),basketPair);
   let orders=0,multiOrders=0,units=0;
@@ -242,7 +243,7 @@ function computeBasketAnalysis(){
       if(left===right?order.kindUnits.get(left)>=2:(order.kindUnits.get(left)>0&&order.kindUnits.get(right)>0))joint+=order.weight;
     }
     return {key,left,right,primary,target,denominator,joint,rate:denominator?joint/denominator:null,share:orders?joint/orders:null};
-  }).filter(c=>c.joint>0||core.some(pair=>JSON.stringify(pair)===c.key)||c.key===JSON.stringify(basketPair));
+  }).filter(c=>c.joint>0);
   const combo=combos.find(c=>c.left===basketPair[0]&&c.right===basketPair[1])||combos[0],skuCounts=new Map(),pairs=new Map();
   if(combo)for(const order of base){
     const primaries=order.anchors.filter(([sku])=>basketType(sku)===combo.primary),targets=order.items.filter(([sku])=>basketType(sku)===combo.target);
@@ -268,19 +269,24 @@ function renderBasketDetails(){
 }
 function renderBasketAnalysis(){
   basketAnalysis=computeBasketAnalysis();
-  if(!basketAnalysis){$('basket-scope').textContent='同购数据尚未生成，请运行刷新数据脚本后重新加载。';$('basket-kpis').innerHTML='';$('basket-combos').innerHTML='';$('basket-combo-table').innerHTML='';renderBasketDetails();return;}
+  if(!basketAnalysis){$('basket-scope').textContent='同购数据尚未生成，请运行刷新数据脚本后重新加载。';$('basket-kpis').innerHTML='';$('basket-combos').innerHTML='';$('basket-combo-table').innerHTML='';$('basket-sku-panel').hidden=true;renderBasketDetails();return;}
   const r=basketAnalysis,model=data.basket_analysis,filters=basketProductFilters.filter(k=>selected[k].size).map(k=>names[k]+'：'+[...selected[k]].map(v=>label(k,v)).join('、'));
   $('basket-scope').textContent='按付款日期、渠道及店铺筛选。同店铺＋原始订单号去重，排除赠品、无效或非正销售净额、非正实发数量及虚拟卡券。'+(filters.length?'主商品条件：'+filters.join('；')+'。保留这些订单中的全部有效搭配商品。':'未指定主商品，展示当前店铺与时间内的全部有效购买订单。');
   $('basket-kpis').innerHTML=[['有效购买订单',int(r.orders),'当前范围的去重订单数'],['多件购买订单',int(r.multiOrders),'同单有效购买商品达到两件'],['多件订单连带率',r.rate===null?'—':pct(r.rate),'多件购买订单 ÷ 有效购买订单'],['每单购买件数',r.orders?(r.units/r.orders).toFixed(2):'—','有效实发商品数量 ÷ 订单数']].map(([title,value,foot])=>`<article><span>${title}</span><strong>${value}</strong><small>${foot}</small></article>`).join('');
   const button=(c,card=false)=>`<button class="${card?'basket-combo-card':'shop-link'} ${r.combo?.key===c.key?'selected':''}" data-basket-left="${esc(c.left)}" data-basket-right="${esc(c.right)}" aria-pressed="${r.combo?.key===c.key}"><span>${esc(c.left+'＋'+c.right)}</span>${card?`<strong>${c.rate===null?'—':pct(c.rate)}</strong><small>${int(c.joint)} 同购订单 / ${int(c.denominator)} ${esc(c.primary)}订单</small>`:''}</button>`;
-  $('basket-combos').innerHTML=r.combos.slice(0,4).map(c=>button(c,true)).join('');
-  $('basket-combo-table').innerHTML=[...r.combos].sort((a,b)=>b.joint-a.joint).map(c=>`<tr><td>${button(c)}</td><td>${esc(c.primary)}</td><td>${int(c.joint)}</td><td>${int(c.denominator)}</td><td>${c.rate===null?'无主品类订单':pct(c.rate)}</td><td>${c.share===null?'—':pct(c.share)}</td></tr>`).join('');$('basket-combo-count').textContent=r.combos.length+' 种搭配';
+  let cards=r.combos.filter(c=>basketCorePairs.some(pair=>pair[0]===c.left&&pair[1]===c.right));
+  if(!cards.length)cards=[...r.combos].sort((a,b)=>b.joint-a.joint).slice(0,4);
+  $('basket-combos').style.setProperty('--basket-card-count',Math.max(1,cards.length));
+  $('basket-combos').innerHTML=cards.map(c=>button(c,true)).join('')||'<div class="basket-empty">当前筛选范围没有有效同购组合</div>';
+  $('basket-combo-table').innerHTML=[...r.combos].sort((a,b)=>b.joint-a.joint).map(c=>`<tr><td>${button(c)}</td><td>${esc(c.primary)}</td><td>${int(c.joint)}</td><td>${int(c.denominator)}</td><td>${pct(c.rate)}</td><td>${pct(c.share)}</td></tr>`).join('')||'<tr class="empty-row"><td colspan="6">当前筛选范围没有有效同购组合</td></tr>';$('basket-combo-count').textContent=r.combos.length+' 种搭配';
   const quality=model.quality;$('basket-quality').textContent=`全量来源处理：排除赠品 ${int(quality['排除赠品行']||0)} 行，原始订单号缺失 ${int(quality['原始订单号缺失行']||0)} 行，付款日期不唯一 ${int(quality['排除付款日期不唯一订单']||0)} 单。BACKPACK/双肩/背包归双肩包，箱套按商品名称或系列识别。同类搭配要求同单至少两件，包括同SKU多件。`;
   $('basket-sku-title').textContent=(r.combo?r.combo.left+'＋'+r.combo.right:'当前组合')+' · SKU连带分析';$('basket-sku-caption').textContent=`主SKU→搭配SKU连带率＝同时购买两者的订单数÷购买主SKU的订单数。当前主品类：${r.combo?.primary||'—'}；右上角可导出当前搜索结果。`;
+  $('basket-sku-panel').hidden=!r.combo;if(r.combo)basketPair=[r.combo.left,r.combo.right];
   renderBasketDetails();
 }
 function exportBasketCSV(){
   if(!basketAnalysis){toast('请先刷新并生成同购数据');return;}
+  if(!basketAnalysis.combo||!basketVisibleRows.length){toast('当前筛选没有可导出的SKU连带记录');return;}
   const header=['主SKU','主货品编号','主商品名称','主系列','主颜色','主尺寸','搭配SKU','搭配货品编号','搭配商品名称','搭配系列','搭配颜色','搭配尺寸','同购订单数','主SKU购买订单数','连带率','品类组合'];
   const values=basketVisibleRows.map(r=>{const a=data.products[r.primary],b=data.products[r.target];return [a.code,a.item_code,a.name,data.dimensions.series[a.series],attribute(r.primary,'color'),attribute(r.primary,'size'),b.code,b.item_code,b.name,data.dimensions.series[b.series],attribute(r.target,'color'),attribute(r.target,'size'),r.joint,r.denominator,pct(r.rate),basketAnalysis.combo.left+'＋'+basketAnalysis.combo.right];});
   const quote=v=>'"'+String(v??'').replaceAll('"','""')+'"',csv='\ufeff'+[header,...values].map(row=>row.map(quote).join(',')).join('\r\n'),url=URL.createObjectURL(new Blob([csv],{type:'text/csv;charset=utf-8'})),a=document.createElement('a');a.href=url;a.download='SKU连带分析_'+new Date().toISOString().slice(0,10)+'.csv';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);toast('已导出当前组合的SKU连带分析');
