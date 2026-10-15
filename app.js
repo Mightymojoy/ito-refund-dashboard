@@ -8,7 +8,7 @@ let skuMatrix=null,matrixRows=[],matrixCell=null,matrixMode='quantity';
 let skuMatrices=[],matrixSeriesSelection=new Set(),matrixSeriesInitialized=false;
 const directKeys=new Set(['year','month','week','day','size','color','channel']),weeks=new Map(),regionOpen=new Set();
 let regionInitialized=false;
-let basketAnalysis=null,basketPair=['行李箱','行李箱'],basketPage=1,basketVisibleRows=[];
+let basketAnalysis=null,basketPair=['行李箱','行李箱'],basketPage=1,basketVisibleRows=[],basketRankingRows=[];
 const basketProductFilters=['category','series','sku','size','color'];
 const basketCorePairs=[['行李箱','行李箱'],['行李箱','双肩包'],['行李箱','箱套'],['双肩包','双肩包']];
 const money=v=>new Intl.NumberFormat('zh-CN',{minimumFractionDigits:2,maximumFractionDigits:2}).format(v),int=v=>new Intl.NumberFormat('zh-CN',{maximumFractionDigits:0}).format(v),pct=v=>(v*100).toFixed(2)+'%';
@@ -259,13 +259,46 @@ function computeBasketAnalysis(){
   return {orders,multiOrders,units,rate:orders?multiOrders/orders:null,combos,combo,rows,signatureRows:base.length};
 }
 function basketProductLabel(sku){const p=data.products[sku];return `${p.code} ${p.item_code} ${p.name} ${data.dimensions.series[p.series]} ${attribute(sku,'color')} ${attribute(sku,'size')}`;}
+function rankBasketPairs(rows){
+  const combinations=new Map();
+  for(const row of rows){
+    const key=JSON.stringify([row.primary,row.target].sort((a,b)=>a-b));
+    if(!combinations.has(key))combinations.set(key,[]);
+    combinations.get(key).push(row);
+  }
+  return [...combinations.values()].map(directions=>{
+    // Keep the eligible anchor direction. If both are eligible, give the pair
+    // one stable display direction and retain the other denominator separately.
+    directions.sort((a,b)=>data.products[a.primary].code.localeCompare(data.products[b.primary].code));
+    const row=directions[0],reverse=directions.find(r=>r.primary===row.target&&r.target===row.primary&&row.primary!==row.target);
+    return {...row,reverseDenominator:reverse?.denominator??null,reverseRate:reverse?.rate??null};
+  }).sort((a,b)=>b.joint-a.joint||b.rate-a.rate||data.products[a.primary].code.localeCompare(data.products[b.primary].code)||data.products[a.target].code.localeCompare(data.products[b.target].code));
+}
+function renderBasketRanking(){
+  basketRankingRows=rankBasketPairs(basketVisibleRows);
+  $('basket-ranking-count').textContent=`TOP ${Math.min(10,basketRankingRows.length)} · 共 ${int(basketRankingRows.length)} 组搭配`;
+  $('basket-ranking-export').disabled=!basketRankingRows.length;
+  const product=sku=>{const p=data.products[sku];return `<div class="basket-ranking-product"><strong>${esc(data.dimensions.series[p.series])}</strong><span>${esc(attribute(sku,'color'))} · ${esc(attribute(sku,'size'))}</span><small>SKU ${esc(p.code)}</small><span class="basket-ranking-name">${esc(p.name)}</span></div>`;};
+  const maximum=basketRankingRows[0]?.joint||1;
+  $('basket-ranking-list').innerHTML=basketRankingRows.slice(0,10).map((r,i)=>`<article class="basket-ranking-row${i<3?' leading':''}" aria-label="第${i+1}名，${esc(data.products[r.primary].code)}搭配${esc(data.products[r.target].code)}，同购${int(r.joint)}单">
+    <span class="basket-ranking-number">${i+1}</span><div class="basket-ranking-products">${product(r.primary)}<span class="basket-ranking-plus" aria-hidden="true">＋</span>${product(r.target)}${r.primary===r.target?'<span class="basket-ranking-same">同SKU购买两件及以上</span>':''}</div>
+    <div class="basket-ranking-orders"><strong>${int(r.joint)}<small> 单</small></strong><span>同购订单</span><div class="basket-ranking-track"><i style="width:${(r.joint/maximum*100).toFixed(2)}%"></i></div></div>
+    <div class="basket-ranking-rates"><strong>主→搭 ${pct(r.rate)}</strong><span>主SKU购买 ${int(r.denominator)} 单</span>${r.reverseRate===null?'':`<strong>搭→主 ${pct(r.reverseRate)}</strong><span>搭配SKU购买 ${int(r.reverseDenominator)} 单</span>`}</div></article>`).join('')||'<div class="basket-empty">当前搜索没有匹配的SKU搭配</div>';
+}
 function renderBasketDetails(){
   const q=$('basket-sku-search').value.trim().toLowerCase(),sort=$('basket-sku-sort').value;
   basketVisibleRows=(basketAnalysis?.rows||[]).filter(r=>(basketProductLabel(r.primary)+' '+basketProductLabel(r.target)).toLowerCase().includes(q)).sort((a,b)=>sort==='rate'?b.rate-a.rate||b.joint-a.joint:b.joint-a.joint||b.rate-a.rate);
+  renderBasketRanking();
   const pages=Math.max(1,Math.ceil(basketVisibleRows.length/40));basketPage=Math.max(1,Math.min(basketPage,pages));
   const productCell=sku=>{const p=data.products[sku];return `<span class="meta-code">${esc(p.code)}</span><span class="sub">${esc(data.dimensions.categories[p.category])} · ${esc(data.dimensions.series[p.series])}</span><span class="sub" title="${esc(p.name)}">${esc(p.name)}</span><span class="sub">${esc(attribute(sku,'color'))} · ${esc(attribute(sku,'size'))}</span>`;};
   $('basket-sku-table').innerHTML=basketVisibleRows.slice((basketPage-1)*40,basketPage*40).map(r=>`<tr><td>${productCell(r.primary)}</td><td>${productCell(r.target)}${r.primary===r.target?'<span class="sub">同SKU购买两件及以上</span>':''}</td><td>${int(r.joint)}</td><td>${int(r.denominator)}</td><td><span class="rate-pill">${pct(r.rate)}</span></td></tr>`).join('')||'<tr class="empty-row"><td colspan="5">当前组合没有匹配的SKU搭配；可选择其他组合、系列或调整店铺与时间</td></tr>';
   $('basket-sku-count').textContent=`${int(basketVisibleRows.length)} 组SKU搭配 · 每页40组`;$('basket-page').textContent=`${basketPage} / ${pages}`;$('basket-prev').disabled=basketPage<=1;$('basket-next').disabled=basketPage>=pages;
+}
+function exportBasketRankingCSV(){
+  if(!basketRankingRows.length){toast('当前筛选没有可导出的热门SKU搭配');return;}
+  const header=['排名','主SKU','主系列','主颜色','主尺寸','主商品名称','搭配SKU','搭配系列','搭配颜色','搭配尺寸','搭配商品名称','同购订单数','主SKU购买订单数','主→搭连带率','搭配SKU购买订单数','搭→主连带率','品类组合'];
+  const values=basketRankingRows.map((r,i)=>{const a=data.products[r.primary],b=data.products[r.target];return [i+1,a.code,data.dimensions.series[a.series],attribute(r.primary,'color'),attribute(r.primary,'size'),a.name,b.code,data.dimensions.series[b.series],attribute(r.target,'color'),attribute(r.target,'size'),b.name,r.joint,r.denominator,pct(r.rate),r.reverseDenominator??'',r.reverseRate===null?'':pct(r.reverseRate),basketAnalysis.combo.left+'＋'+basketAnalysis.combo.right];});
+  const quote=v=>'"'+String(v??'').replaceAll('"','""')+'"',csv='\ufeff'+[header,...values].map(row=>row.map(quote).join(',')).join('\r\n'),url=URL.createObjectURL(new Blob([csv],{type:'text/csv;charset=utf-8'})),a=document.createElement('a');a.href=url;a.download='热门SKU搭配排名_'+new Date().toISOString().slice(0,10)+'.csv';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);toast('已导出当前筛选的全部SKU搭配排名');
 }
 function renderBasketAnalysis(){
   basketAnalysis=computeBasketAnalysis();
@@ -360,8 +393,9 @@ $('region-tree').addEventListener('toggle',e=>{const k=e.target.dataset.regionKe
 $('compare-mode').onchange=()=>{$('compare-search').value='';renderComparison();};$('compare-search').oninput=renderComparison;$('compare-product').onchange=renderComparison;
 $('sku-series-search').oninput=()=>{renderMatrixSeriesPicker();$('sku-series-picker').open=true;};$('sku-series-options').onchange=e=>{const input=e.target.closest('[data-matrix-series-option]');if(!input)return;input.checked?matrixSeriesSelection.add(input.value):matrixSeriesSelection.delete(input.value);matrixSeriesInitialized=true;matrixCell=null;renderSKUAnalysis();};
 $('basket-sku-search').oninput=()=>{basketPage=1;renderBasketDetails();};$('basket-sku-sort').onchange=()=>{basketPage=1;renderBasketDetails();};$('basket-prev').onclick=()=>{basketPage--;renderBasketDetails();};$('basket-next').onclick=()=>{basketPage++;renderBasketDetails();};
+$('basket-ranking-export').onclick=exportBasketRankingCSV;
 $('basket-reset').onclick=()=>{basketPair=['行李箱','行李箱'];basketPage=1;$('basket-sku-search').value='';$('basket-sku-sort').value='orders';renderBasketAnalysis();};
-document.addEventListener('click',e=>{const button=e.target.closest('[data-basket-left]');if(button){basketPair=[button.dataset.basketLeft,button.dataset.basketRight];basketPage=1;renderBasketAnalysis();}});
+document.addEventListener('click',e=>{const button=e.target.closest('[data-basket-left]');if(button){basketPair=[button.dataset.basketLeft,button.dataset.basketRight];basketPage=1;renderBasketAnalysis();if(!$('basket-sku-panel').hidden)$('basket-sku-panel').scrollIntoView({block:'start'});}});
 document.addEventListener('keydown',e=>{if(e.key==='Escape'&&$('sku-series-picker').open){$('sku-series-picker').open=false;$('sku-series-picker').querySelector('summary').focus();}});
 load();setInterval(()=>{if(document.visibilityState==='visible')load();},60000);document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='visible')load();});
-window.dashboardState=()=>({data,selected,filtered,totals:filtered.length?sum(filtered):null,tab,productRows,shopRows,seriesRows,regionRows,compareRows,channelRows,skuMatrix,skuMatrices,matrixCell,matrixSeriesSelection,basketAnalysis,basketPair,basketVisibleRows});
+window.dashboardState=()=>({data,selected,filtered,totals:filtered.length?sum(filtered):null,tab,productRows,shopRows,seriesRows,regionRows,compareRows,channelRows,skuMatrix,skuMatrices,matrixCell,matrixSeriesSelection,basketAnalysis,basketPair,basketVisibleRows,basketRankingRows});
