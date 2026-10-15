@@ -71,7 +71,12 @@
       <section id="basket-sku-panel" class="panel table-panel"><div class="panel-head"><div><h2 id="basket-sku-title">行李箱＋行李箱 · SKU连带分析</h2><p id="basket-sku-caption"></p></div><div class="table-controls"><input id="basket-sku-search" placeholder="搜索主SKU、搭配SKU或系列" aria-label="搜索SKU连带"><select id="basket-sku-sort" aria-label="SKU连带排序"><option value="orders">同购订单数降序</option><option value="rate">连带率降序</option></select></div></div><p class="analysis-note">左侧品类、系列、SKU、尺寸、颜色用于选择主商品，搭配商品保留完整订单范围。同一订单可能出现多个组合，各组合订单数与连带率不能相加。同一SKU购买两件也计入同品类连带。</p>
         <section class="basket-ranking" aria-labelledby="basket-ranking-title">
           <div class="basket-ranking-head"><div><h3 id="basket-ranking-title">热门 SKU 搭配排名</h3><p>随当前筛选、品类组合与搜索自动更新，按同购订单数展示前10名；互为主搭的同一组合合并展示。</p></div><div class="basket-ranking-actions"><span class="panel-badge" id="basket-ranking-count"></span><button class="button" id="basket-ranking-export">导出全部排名</button></div></div>
-          <div class="basket-ranking-legend"><span>左侧为主SKU，右侧为搭配SKU；连带率＝同购订单数÷对应SKU购买订单数。</span><span>完整排名可导出</span></div><div id="basket-ranking-list" class="basket-ranking-list"></div>
+          <div class="basket-ranking-legend"><span>每组左侧商品为主SKU，右侧商品为搭配SKU。</span><span>完整排名可导出</span></div>
+          <div class="basket-ranking-explanation" id="basket-ranking-explanation">
+            <p><strong>主→搭：</strong>购买主SKU的订单中，同时购买搭配SKU的比例。<span>同购订单数 ÷ 主SKU购买订单数</span></p>
+            <p><strong>搭→主：</strong>购买搭配SKU的订单中，同时购买主SKU的比例。<span>同购订单数 ÷ 搭配SKU购买订单数</span></p>
+            <p class="basket-ranking-direction-note">两个方向使用相同的同购订单数，分母分别为各自商品的购买订单数，因此连带率可能不同，两个百分比不能相加。每组下方展示实际计算公式。</p>
+          </div><div id="basket-ranking-list" class="basket-ranking-list"></div>
         </section><div class="basket-detail-heading">SKU搭配完整明细</div><div class="table-scroll"><table><thead><tr><th>主SKU / 系列 / 属性</th><th>搭配SKU / 系列 / 属性</th><th>同购订单数</th><th>主SKU购买订单数</th><th>主SKU→搭配SKU连带率</th></tr></thead><tbody id="basket-sku-table"></tbody></table></div><div class="pagination"><span id="basket-sku-count"></span><div><button class="button" id="basket-prev">上一页</button><span id="basket-page"></span><button class="button" id="basket-next">下一页</button></div></div></section>
     </div>
     <div id="compare-view" hidden>
