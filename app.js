@@ -4,6 +4,8 @@ const names={year:'年',month:'月',week:'周',day:'日',channel:'渠道',shop:'
 const pos={shop:1,category:2,series:3,sku:4},keys=Object.keys(names);
 let data=null,selected=Object.fromEntries(keys.map(k=>[k,new Set()])),tab='overview',page=1,productRows=[],filtered=[],shopRows=[],polling=false;
 let seriesRows=[],regionRows=[],compareRows=[],channelRows=[];
+let seriesWeeklyTrend=null,seriesTrendSelection=new Set(),seriesTrendManual=false,seriesTrendWeek=null;
+const seriesTrendColors=['#4263eb','#119783','#db8541','#9360c7','#d34f79','#4186a1','#85832f','#80543c'];
 let skuMatrix=null,matrixRows=[],matrixCell=null,matrixMode='quantity';
 let skuMatrices=[],matrixSeriesSelection=new Set(),matrixSeriesInitialized=false;
 const directKeys=new Set(['year','month','week','day','size','color','channel']),weeks=new Map(),regionOpen=new Set();
@@ -43,7 +45,7 @@ function renderOptions(k){
   $(`options-${k}`).innerHTML=show.length?show.map(v=>`<label class="filter-option" title="${esc(fullLabel(k,v))}"><input type="checkbox" data-filter="${k}" value="${esc(v)}" ${selected[k].has(v)?'checked':''}><span>${esc(label(k,v))}</span></label>`).join('')+(opts.length>400?'<div class="filter-none">选项较多，请搜索缩小范围</div>':''):'<div class="filter-none">没有匹配选项</div>';
   const count=$(`count-${k}`);count.textContent=selected[k].size?selected[k].size===1?label(k,[...selected[k]][0]):`${selected[k].size} 项`:'全部';count.classList.toggle('selected',!!selected[k].size);
 }
-function sum(rows){const v={sales:0,returns:0,qty:0,returnQty:0,lines:0,bad:0,refundBad:0,refundLines:0,skuCount:new Set(rows.map(r=>r[4])).size};for(const r of rows){v.sales+=r[5];v.returns+=r[6];v.qty+=r[7];v.returnQty+=r[8]||0;v.lines+=r[9];v.bad+=r[10];v.refundBad+=r[11]||0;v.refundLines+=r[12]||0;}v.rate=v.sales>0&&!v.bad&&!v.refundBad&&data.metric_ready?v.returns/v.sales:null;v.quantityRate=v.qty>0?v.returnQty/v.qty:null;return v;}
+function sum(rows){const v={sales:0,returns:0,qty:0,returnQty:0,lines:0,bad:0,refundBad:0,refundLines:0,skuCount:new Set(rows.map(r=>r[4])).size};for(const r of rows){v.sales+=r[5];v.returns+=r[6];v.qty+=r[7];v.returnQty+=r[8]||0;v.lines+=r[9];v.bad+=r[10];v.refundBad+=r[11]||0;v.refundLines+=r[12]||0;}v.rate=v.sales>0&&!v.bad&&!v.refundBad&&data.metric_ready?v.returns/v.sales:null;v.refundFactor=v.rate===null?null:v.sales*v.rate;v.quantityRate=v.qty>0?v.returnQty/v.qty:null;return v;}
 function rateText(r){return r.rate!==null?pct(r.rate):r.bad||r.refundBad?'金额异常':r.sales<=0?'无销售数据':'—';}
 function ratePill(r){return r.rate===null?`<span class="bar-value pending">${rateText(r)}</span>`:`<span class="rate-pill ${r.rate>.25?'high':''}">${pct(r.rate)}</span>`;}
 function grouped(rows,index){const groups=new Map();for(const r of rows){const key=typeof index==='function'?index(r):r[index];if(!groups.has(key))groups.set(key,[]);groups.get(key).push(r);}return [...groups].map(([key,rs])=>({key,...sum(rs)}));}
@@ -54,6 +56,7 @@ function render(){
   $('rate').innerHTML=totals.rate!==null?(totals.rate*100).toFixed(2)+'<small>%</small>':'—';$('rate-foot').textContent=totals.rate===null?rateText(totals):'退款金额 / 对应销售金额';
   $('sales').innerHTML=totals.bad?'—':amount(totals.sales);$('sales-foot').textContent=data.config.sales_amount_mode==='item_payment_less_postage'?'单品支付金额－分摊邮费 · 已发货':'销售订单明细 · '+(data.config.sales_amount_column?data.config.sales_amount_column+'列':'')+(data.config.exclude_unshipped?'已发货销售金额合计':'订单支付金额合计');$('returns').innerHTML=totals.refundBad?'—':amount(totals.returns);$('returns-foot').textContent=data.config.calculation_mode==='matched_order_cohort'?'售后AI列 · 匹配订单后归回付款日期':data.config.refund_amount_grain==='sku_line'?'售后退货明细 · '+data.config.return_amount_column+'列商品金额合计':'售后退货明细 · 去重分摊后的退款总额';
   $('quantity').textContent=int(totals.qty);$('quantity-foot').textContent=`${int(totals.lines)} 行销售明细 · ${int(totals.skuCount)} 个商品SKU`;
+  $('refund-factor').innerHTML=totals.refundFactor===null?'—':amount(totals.refundFactor);$('refund-factor').title=totals.refundFactor===null?rateText(totals):money(totals.sales)+' 元 × '+(totals.rate*100).toFixed(6)+'% ≈ '+money(totals.refundFactor)+' 元（使用未四舍五入退款率计算）';$('refund-factor-foot').textContent=totals.refundFactor===null?'暂不可计算 · '+rateText(totals):'发货金额 × 退款率 · 同口径等于退款金额';
   shopRows=grouped(filtered,1).sort((a,b)=>(b.rate??-1)-(a.rate??-1)||b.sales-a.sales);$('shop-count').textContent=shopRows.length+' 个店铺';$('channel-rows').textContent=shopRows.length+' 条结果';
   channelRows=grouped(filtered,r=>shopChannel(r[1])).sort(compareRate);
   seriesRows=grouped(filtered,3).sort(compareRate);
@@ -98,14 +101,14 @@ function renderChannelShopBreakdown(){
 }
 function renderTrend(){
   const g=$('granularity').value,metric=$('trend-metric').value,points=grouped(filtered,r=>g==='month'?r[0].slice(0,7):g==='week'?weekInfo(r[0]).start:r[0]).sort((a,b)=>a.key.localeCompare(b.key));
-  const title={rate:'退款率',returns:'退款金额',sales:'销售金额'}[metric],value=r=>metric==='rate'?r.rate:metric==='sales'?r.bad?null:r.sales:r.refundBad?null:r.returns;
+  const title={rate:'退款率',returns:'退款金额',sales:'销售金额',refundFactor:'退款因子'}[metric],value=r=>metric==='rate'?r.rate:metric==='refundFactor'?r.refundFactor:metric==='sales'?r.bad?null:r.sales:r.refundBad?null:r.returns;
   $('trend-caption').textContent=(data.config.calculation_mode==='matched_order_cohort'?'销售与对应售后均按订单付款日期':'销售按付款日期，售后按登记日期')+(g==='week'?' · 周一至周日':'');$('trend-legend').textContent=title;
   const valid=points.filter(p=>value(p)!==null);if(!valid.length){$('trend-chart').innerHTML='<div class="chart-empty">当前范围没有可计算的'+title+'</div>';return;}
   const W=620,H=225,L=72,R=18,T=16,B=38,max=Math.max(metric==='rate'?.01:1,...valid.map(value))*1.16,x=i=>L+(points.length===1?(W-L-R)/2:i/(points.length-1)*(W-L-R)),y=v=>T+(1-v/max)*(H-T-B),fmt=v=>metric==='rate'?pct(v):compactMoney(v);
   let svg='';for(let i=0;i<=4;i++){const yy=T+i/4*(H-T-B);svg+=`<line x1="${L}" y1="${yy}" x2="${W-R}" y2="${yy}" stroke="#eef1f7" stroke-dasharray="3 4"/><text x="${L-10}" y="${yy+3}" text-anchor="end" fill="#a2aec2" font-size="10">${fmt(max*(1-i/4))}</text>`;}
   const step=Math.max(1,Math.ceil(points.length/6));points.forEach((p,i)=>{if(i%step===0||i===points.length-1)svg+=`<text x="${x(i)}" y="${H-12}" text-anchor="middle" fill="#99a6bd" font-size="10">${g==='month'?p.key:g==='week'?weekInfo(p.key).iso:p.key.slice(5)}</text>`;});
   const segments=[];let seg=[];points.forEach((p,i)=>{if(value(p)===null){if(seg.length)segments.push(seg);seg=[];}else seg.push([p,i]);});if(seg.length)segments.push(seg);
-  for(const seg of segments){const path=seg.map(([p,i],j)=>(j?'L':'M')+x(i).toFixed(1)+','+y(value(p)).toFixed(1)).join(' ');svg+=`<path d="${path} L${x(seg.at(-1)[1])},${H-B} L${x(seg[0][1])},${H-B} Z" fill="url(#area)"/><path d="${path}" fill="none" stroke="#4263eb" stroke-width="2.5"/>`;seg.forEach(([p,i])=>{svg+=`<circle cx="${x(i)}" cy="${y(value(p))}" r="${points.length>50?2:4}" fill="white" stroke="#4263eb" stroke-width="2"><title>${g==='week'?weekInfo(p.key).label:p.key}\n退款率：${rateText(p)}\n销售金额：${money(p.sales)} 元\n退款金额：${money(p.returns)} 元</title></circle>`;});}
+  for(const seg of segments){const path=seg.map(([p,i],j)=>(j?'L':'M')+x(i).toFixed(1)+','+y(value(p)).toFixed(1)).join(' ');svg+=`<path d="${path} L${x(seg.at(-1)[1])},${H-B} L${x(seg[0][1])},${H-B} Z" fill="url(#area)"/><path d="${path}" fill="none" stroke="#4263eb" stroke-width="2.5"/>`;seg.forEach(([p,i])=>{svg+=`<circle cx="${x(i)}" cy="${y(value(p))}" r="${points.length>50?2:4}" fill="white" stroke="#4263eb" stroke-width="2"><title>${g==='week'?weekInfo(p.key).label:p.key}\n退款率：${rateText(p)}\n销售金额：${money(p.sales)} 元\n退款金额：${money(p.returns)} 元\n退款因子：${p.refundFactor===null?"不可计算":money(p.refundFactor)+" 元"}</title></circle>`;});}
   $('trend-chart').innerHTML=`<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="${title}趋势"><defs><linearGradient id="area" x1="0" y1="0" x2="0" y2="1"><stop stop-color="#4263eb" stop-opacity=".13"/><stop offset="1" stop-color="#4263eb" stop-opacity="0"/></linearGradient></defs>${svg}</svg>`;
 }
 function renderProducts(){
@@ -127,6 +130,78 @@ function renderSeries(){
   const share=r=>all.sales>0&&!all.bad&&!r.bad?pct(r.sales/all.sales):'—';
   $('series-table').innerHTML=shown.map(r=>`<tr><td><button class="shop-link" data-group-filter="series" data-group-id="${r.key}">${esc(data.dimensions.series[r.key])}</button></td><td>${r.bad?'—':money(r.sales)}</td><td>${r.refundBad?'—':money(r.returns)}</td><td>${ratePill(r)}</td><td>${share(r)}</td><td>${int(r.qty)}</td></tr>`).join('')||'<tr class="empty-row"><td colspan="6">没有匹配系列</td></tr>';
   $('series-total').innerHTML=`<tr><td>当前可见系列合计</td><td>${total.bad?'—':money(total.sales)}</td><td>${total.refundBad?'—':money(total.returns)}</td><td>${ratePill(total)}</td><td>${share(total)}</td><td>${int(total.qty)}</td></tr>`;
+  renderSeriesWeeklyTrend();
+}
+function shiftDate(date,days){const d=new Date(date+'T00:00:00Z');d.setUTCDate(d.getUTCDate()+days);return d.toISOString().slice(0,10);}
+function seriesTrendChoices(){return seriesRows.slice().sort((a,b)=>b.sales-a.sales||data.dimensions.series[a.key].localeCompare(data.dimensions.series[b.key],'zh-CN')).map(r=>data.dimensions.series[r.key]);}
+function renderSeriesTrendPicker(){
+  const focused=document.activeElement?.hasAttribute('data-series-trend-option')?document.activeElement.value:null;
+  const available=seriesTrendChoices(),q=$('series-trend-search').value.trim().toLowerCase(),choices=[...new Set([...available,...seriesTrendSelection])].filter(name=>name.toLowerCase().includes(q));
+  $('series-trend-selection-label').textContent=seriesTrendSelection.size?`已选 ${seriesTrendSelection.size} 个系列`:'选择系列（可多选）';
+  $('series-trend-options').innerHTML=choices.map(name=>`<label class="series-trend-option ${available.includes(name)?'':'unavailable'}"><input type="checkbox" data-series-trend-option value="${esc(name)}" ${seriesTrendSelection.has(name)?'checked':''}><span>${esc(name)}${available.includes(name)?'':'<small>当前筛选无数据</small>'}</span></label>`).join('')||'<div class="filter-none">没有匹配系列</div>';
+  if(focused!==null)[...$('series-trend-options').querySelectorAll('input')].find(el=>el.value===focused)?.focus({preventScroll:true});
+}
+function weeklyChangeText(point){if(point.change===null)return '较上周 —';const rounded=Number(point.change.toFixed(2));return rounded===0?'较上周持平':`较上周 ${rounded>0?'+':''}${rounded.toFixed(2)} 个百分点`;}
+function weeklyChangeClass(point){const rounded=point.change===null?0:Number(point.change.toFixed(2));return rounded>0?'increased':rounded<0?'decreased':'unchanged';}
+function weeklyPointText(point){return !point.hasData?'无订单':rateText(point);}
+function weeklyPointTitle(series,point){const w=point.week;return `${series.name}\n${w.label}${w.partial?'（部分周）':''}\n本次统计：${w.effectiveStart} 至 ${w.effectiveEnd}\n退款率：${weeklyPointText(point)}\n${weeklyChangeText(point)}\n发货金额：${point.bad?'金额异常':money(point.sales)+' 元'}\n退款金额：${point.refundBad?'金额异常':money(point.returns)+' 元'}\n退款因子：${point.refundFactor===null?'不可计算':money(point.refundFactor)+' 元'}`;}
+function buildSeriesWeeklyTrend(){
+  const names=[...seriesTrendSelection],chosen=new Set(names),buckets=new Map();let first=null,last=null,coverageFirst=null,coverageLast=null;
+  for(const r of data.facts){if(coverageFirst===null||r[0]<coverageFirst)coverageFirst=r[0];if(coverageLast===null||r[0]>coverageLast)coverageLast=r[0];}
+  for(const r of filtered){
+    if(first===null||r[0]<first)first=r[0];if(last===null||r[0]>last)last=r[0];
+    const name=data.dimensions.series[r[3]];if(!chosen.has(name))continue;
+    if(!buckets.has(name))buckets.set(name,new Map());const key=weekInfo(r[0]).start,byWeek=buckets.get(name);if(!byWeek.has(key))byWeek.set(key,[]);byWeek.get(key).push(r);
+  }
+  const periods=[];
+  if(first!==null)for(let key=weekInfo(first).start;key<=weekInfo(last).start;key=shiftDate(key,7)){
+    const info=weekInfo(key),days=Array.from({length:7},(_,i)=>shiftDate(key,i)).filter(date=>date>=coverageFirst&&date<=coverageLast&&['year','month','week','day'].every(k=>!selected[k].size||selected[k].has(getValue([date],k))));
+    if(days.length)periods.push({key,...info,effectiveStart:days[0],effectiveEnd:days.at(-1),partial:days.length!==7});
+  }
+  const series=names.map((name,index)=>{
+    const byWeek=buckets.get(name)||new Map(),points=periods.map(week=>{const rows=byWeek.get(week.key)||[];return {week,...sum(rows),hasData:rows.length>0,change:null};}),lookup=new Map(points.map(p=>[p.week.key,p]));
+    for(const p of points){const previous=lookup.get(shiftDate(p.week.key,-7));if(p.rate!==null&&previous?.rate!=null)p.change=(p.rate-previous.rate)*100;}
+    return {name,color:seriesTrendColors[index%seriesTrendColors.length],points};
+  });
+  return {weeks:periods,series};
+}
+function renderSeriesWeeklyTrend(){
+  if(!seriesTrendManual){const available=seriesTrendChoices();seriesTrendSelection=new Set(selected.series.size?available:available.slice(0,5));}
+  renderSeriesTrendPicker();seriesWeeklyTrend=buildSeriesWeeklyTrend();const {weeks:periods,series}=seriesWeeklyTrend;
+  $('series-trend-scope').textContent=`${seriesTrendManual?'自定义对比':'默认展示'+(selected.series.size?'左侧已选系列':'销售金额前 5 个系列')} · 已选 ${series.length} 个系列 · ${periods.length} 周。左侧时间、渠道、店铺及商品属性同步生效；本模块选择只影响周趋势。`;
+  $('series-trend-chips').innerHTML=series.map(s=>`<span class="series-trend-chip"><i style="background:${s.color}"></i>${esc(s.name)}<button data-series-trend-remove="${esc(s.name)}" aria-label="移除趋势系列${esc(s.name)}">×</button></span>`).join('');
+  $('series-trend-export').disabled=!series.length||!periods.length;
+  renderSeriesWeeklyChart();
+  if(!periods.some(w=>w.key===seriesTrendWeek))seriesTrendWeek=periods.at(-1)?.key||null;
+  renderSeriesWeeklyDetail(seriesTrendWeek);
+  $('series-weekly-table').closest('table').style.minWidth=(215+170*series.length)+'px';
+  $('series-weekly-head').innerHTML=`<tr><th scope="col">订单付款周</th>${series.map(s=>`<th scope="col" title="${esc(s.name)}"><i style="background:${s.color}"></i>${esc(s.name)}</th>`).join('')}</tr>`;
+  $('series-weekly-table').innerHTML=!series.length||!periods.length?`<tr class="empty-row"><td colspan="${Math.max(1,series.length+1)}">${!series.length?'请选择需要对比的系列':'当前筛选没有可统计的订单'}</td></tr>`:periods.slice().reverse().map(w=>`<tr><th scope="row"><button class="shop-link" data-trend-week="${w.key}">${w.iso}${w.partial?'<span class="series-partial">部分周</span>':''}<span class="sub">${w.start} 至 ${w.end}</span>${w.partial?`<span class="sub">统计 ${w.effectiveStart} 至 ${w.effectiveEnd}</span>`:''}</button></th>${series.map(s=>{const p=s.points.find(p=>p.week.key===w.key);return `<td title="${esc(weeklyPointTitle(s,p))}"><strong>${p.rate===null?'—':pct(p.rate)}</strong><small class="${weeklyChangeClass(p)}">${p.rate===null?esc(weeklyPointText(p)):weeklyChangeText(p)}</small></td>`;}).join('')}</tr>`).join('');
+}
+function renderSeriesWeeklyChart(){
+  const {weeks:periods,series}=seriesWeeklyTrend,container=$('series-weekly-chart');
+  if(!series.length||!periods.length){container.innerHTML=`<div class="chart-empty">${!series.length?'请选择需要对比的系列':'当前筛选没有可统计的订单'}</div>`;return;}
+  const valid=series.flatMap(s=>s.points.filter(p=>p.rate!==null).map(p=>p.rate));if(!valid.length){container.innerHTML='<div class="chart-empty">当前系列没有可计算的退款率，请查看下方每周明细</div>';return;}
+  const W=960,H=290,L=62,R=34,T=18,B=46,lo=Math.min(0,...valid),hi=Math.max(.01,...valid),pad=(hi-lo)*.12,min=lo<0?lo-pad:0,max=hi+pad,x=i=>L+(periods.length===1?(W-L-R)/2:i/(periods.length-1)*(W-L-R)),y=v=>T+(max-v)/(max-min)*(H-T-B);
+  let svg='';for(let i=0;i<=4;i++){const v=max-(max-min)*i/4,yy=y(v);svg+=`<line x1="${L}" y1="${yy}" x2="${W-R}" y2="${yy}" stroke="#e8edf6" stroke-dasharray="3 4"/><text x="${L-10}" y="${yy+4}" text-anchor="end" fill="#8191ab" font-size="11">${pct(v)}</text>`;}
+  const step=Math.max(1,Math.ceil(periods.length/8));periods.forEach((w,i)=>{if(i%step===0||i===periods.length-1)svg+=`<text x="${x(i)}" y="${H-23}" text-anchor="middle" fill="#8191ab" font-size="11">${w.iso}<tspan x="${x(i)}" dy="14" font-size="10">${w.start.slice(5)}${w.partial?' · 部分周':''}</tspan></text>`;});
+  series.forEach((s,si)=>{
+    let segment=[];const draw=()=>{if(!segment.length)return;svg+=`<path class="series-weekly-line" data-trend-series="${esc(s.name)}" d="${segment.map(([p,i],j)=>(j?'L':'M')+x(i).toFixed(2)+','+y(p.rate).toFixed(2)).join(' ')}" fill="none" stroke="${s.color}" stroke-width="2.5" ${si>=seriesTrendColors.length?'stroke-dasharray="6 4"':''}/>`;segment=[];};
+    s.points.forEach((p,i)=>{if(p.rate===null){draw();return;}segment.push([p,i]);});draw();
+    s.points.forEach((p,i)=>{if(p.rate!==null)svg+=`<circle data-trend-series="${esc(s.name)}" data-trend-week="${p.week.key}" cx="${x(i)}" cy="${y(p.rate)}" r="3.5" fill="#fff" stroke="${s.color}" stroke-width="2"><title>${esc(weeklyPointTitle(s,p))}</title></circle>`;});
+  });
+  periods.forEach((w,i)=>{const left=i?(x(i-1)+x(i))/2:L-10,right=i===periods.length-1?W-R+10:(x(i)+x(i+1))/2;svg+=`<rect class="series-week-hit" data-trend-week="${w.key}" x="${left}" y="${T}" width="${right-left}" height="${H-T-B}" fill="transparent" tabindex="0" role="button" aria-label="查看${esc(w.label)}各系列退款率"/>`;});
+  container.innerHTML=`<div class="series-weekly-plot"><svg viewBox="0 0 ${W} ${H}" role="img" aria-label="各系列每周退款率趋势">${svg}</svg></div>`;
+}
+function renderSeriesWeeklyDetail(key){
+  const {weeks:periods,series}=seriesWeeklyTrend||{weeks:[],series:[]},week=periods.find(w=>w.key===key),container=$('series-weekly-detail');seriesTrendWeek=key;
+  if(!week||!series.length){container.innerHTML='';return;}
+  container.innerHTML=`<div class="series-weekly-detail-heading"><strong>${week.iso} · ${week.start} 至 ${week.end}${week.partial?' · 部分周':''}</strong><span>本次统计 ${week.effectiveStart} 至 ${week.effectiveEnd} · 截至最新源表的累计售后</span></div><div class="series-weekly-detail-cards">${series.map(s=>{const p=s.points.find(p=>p.week.key===key);return `<article><div><i style="background:${s.color}"></i><span title="${esc(s.name)}">${esc(s.name)}</span></div><strong>${p.rate===null?'—':pct(p.rate)}</strong><small class="${weeklyChangeClass(p)}">${p.rate===null?esc(weeklyPointText(p)):weeklyChangeText(p)}</small><p>发货 ${p.bad?'金额异常':money(p.sales)+' 元'}<br>退款 ${p.refundBad?'金额异常':money(p.returns)+' 元'}</p></article>`;}).join('')}</div>`;
+}
+function exportSeriesWeeklyCSV(){
+  if(!seriesWeeklyTrend?.weeks.length||!seriesWeeklyTrend.series.length){toast('当前没有可导出的系列周趋势');return;}
+  const header=['系列','ISO周','周开始','周结束','本次统计开始','本次统计结束','是否部分周','发货金额（元）','退款金额（元）','退款率','较上周变化（百分点）','退款因子（元）','状态'],rows=seriesWeeklyTrend.series.flatMap(s=>s.points.map(p=>[s.name,p.week.iso,p.week.start,p.week.end,p.week.effectiveStart,p.week.effectiveEnd,p.week.partial?'是':'否',!p.hasData?'':p.bad?'金额异常':p.sales.toFixed(2),!p.hasData?'':p.refundBad?'金额异常':p.returns.toFixed(2),p.rate===null?'':(p.rate*100).toFixed(6)+'%',p.change===null?'':p.change.toFixed(6),p.refundFactor===null?'':p.refundFactor.toFixed(2),p.rate===null?weeklyPointText(p):'可计算'])),quote=v=>'"'+String(v??'').replaceAll('"','""')+'"',csv='\ufeff'+[header,...rows].map(r=>r.map(quote).join(',')).join('\r\n'),url=URL.createObjectURL(new Blob([csv],{type:'text/csv;charset=utf-8'})),a=document.createElement('a');
+  a.href=url;a.download='系列每周退款率_'+new Date().toISOString().slice(0,10)+'.csv';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);toast('已导出所选系列每周退款率与变化');
 }
 function renderRegions(){
   const sort=$('region-sort').value,order=sort==='rate'?compareRate:sort==='sales'?(a,b)=>b.sales-a.sales:(a,b)=>b.returns-a.returns||b.sales-a.sales;
@@ -365,6 +440,7 @@ function renderQuality(){
   const matchRule=cohort?'售后“原始单号＋货品编号”与销售“子单原始单号＋货品编号”逐笔匹配，并校验店铺；仅关联已纳入销售范围的订单。SKU、品类、系列及日期继承销售行。未匹配或存在多个日期/SKU归属的记录排除；重复销售匹配不放大退款，每条符合条件的售后金额各计一次。':'退款不要求存在逐笔匹配销售。';
   $('method').innerHTML=`<dt>退款率</dt><dd>当前筛选订单对应的售后退款金额合计 ÷ 同组店铺、品类、系列、SKU的销售金额合计。${cohort?'先匹配订单并归属日期，再汇总计算。':'先分别汇总，再计算比率。'}</dd><dt>销售范围</dt><dd>仅订单类型为“网店销售”${shippedRule}。${salesRule}其他记录不计入。销售件数为实发数量合计。</dd><dt>日期筛选</dt><dd>${dateRule}</dd><dt>售后范围</dt><dd>累计源表中类型为退款、退货的记录，换货排除。${refundRule}${matchRule}</dd><dt>无销售金额</dt><dd>匹配订单的销售金额为零时，退款金额正常展示，退款率显示“无销售数据”。金额异常仅影响对应分组。</dd><dt>来源核验</dt><dd>三个指定目录是唯一业务数据源；产品匹配表只提供商品归属。参考工作簿不提供指标金额，也不阻断当前汇总。</dd><dt>明细下载</dt><dd>使用右上角“导出当前明细”下载筛选后的商品汇总。逐笔销售、售后订单及未匹配记录在本地看板核查。</dd>`;
   $('method').innerHTML+='<dt>省市与占比</dt><dd>省市取销售订单 O 列“收货地区”，退款继承匹配销售订单省市。缺失和多地区匹配单独列示，金额保留。省、市两级销售占比均除以本店当前筛选销售合计；退款金额占比除以本店当前筛选退款合计。</dd><dt>尺寸与颜色</dt><dd>取产品匹配表，独立筛选且联动所有视图；同一 SKU 多值冲突分别标为尺寸待确认、颜色待确认。缺失值单独显示，金额保留。</dd><dt>同款店铺对比</dt><dd>默认按同一 SKU 比较各店铺；选择按系列时，比较当前筛选范围内该系列的合计。各店铺均使用相同时间、尺寸与颜色条件。</dd>';
+  $('method').innerHTML+='<dt>退款因子</dt><dd>当前筛选发货金额 × 未四舍五入的退款率，单位为元。发货金额沿用销售金额口径：已发货网店销售订单的单品支付金额减分摊邮费。同口径下等于退款金额；无正销售金额、金额异常或指标尚未就绪时不可计算。</dd><dt>系列每周趋势</dt><dd>按订单付款日期的 ISO 周（周一至周日）汇总各系列退款金额与销售金额后相除，不平均 SKU 退款率。较上周变化为当前周退款率减相邻自然周退款率，单位为百分点；未选择的周、无订单周或不可计算周不补成 0%，也不跨过缺失周计算变化。左侧日期与跨月周取交集；部分周单独标记。历史订单累计退款随售后更新而变化，近期周的售后观察时间较短。</dd>';
   const rules=data.config.channel_rules;
   if(rules)$('method').innerHTML+=`<dt>渠道分类</dt><dd>指定的 ${rules.online_owned_shops.length} 家店铺优先归为线上自营；其余店铺名称包含 ${esc(rules.online_reseller_keywords.join('、'))} 的归为线上经销，其余归为线下。渠道是店铺归类，销售范围继续遵循上方销售规则。渠道退款率按该渠道退款金额合计除以销售金额合计。</dd>`;
   $('source-table').innerHTML=data.sources.map(s=>`<tr><td>${esc(s.name)}</td><td>${int(s.rows)}</td><td>${esc(s.updated.replace('T',' '))}</td></tr>`).join('');
@@ -411,6 +487,18 @@ document.querySelectorAll('[data-tab]').forEach(e=>e.onclick=()=>showTab(e.datas
 document.addEventListener('click',e=>{if(!$('sku-series-picker').contains(e.target)&&e.target!==$('sku-series-search'))$('sku-series-picker').open=false;const resetSeries=e.target.closest('[data-matrix-series-reset]');if(resetSeries){resetMatrixSeries();return;}const removeSeries=e.target.closest('[data-matrix-series-remove]');if(removeSeries){matrixSeriesSelection.delete(removeSeries.dataset.matrixSeriesRemove);matrixSeriesInitialized=true;matrixCell=null;renderSKUAnalysis();return;}const selectVisible=e.target.closest('[data-matrix-series-select-visible]');if(selectVisible){const q=$('sku-series-search').value.trim().toLowerCase();for(const name of matrixSeriesChoices())if(name.toLowerCase().includes(q))matrixSeriesSelection.add(name);matrixSeriesInitialized=true;matrixCell=null;renderSKUAnalysis();return;}const mode=e.target.closest('[data-matrix-mode]');if(mode){matrixMode=mode.dataset.matrixMode;renderSKUAnalysis();return;}const cell=e.target.closest('[data-matrix-cell]');if(cell&&matrixSeriesSelection.has(cell.dataset.matrixSeries)){matrixCell={series:cell.dataset.matrixSeries,color:cell.dataset.matrixColor??null,size:cell.dataset.matrixSize??null};renderSKUAnalysis();return;}const resetCell=e.target.closest('[data-matrix-reset]');if(resetCell){matrixCell=null;renderSKUAnalysis();return;}const open=e.target.closest('[data-open-tab]');if(open){showTab(open.dataset.openTab);return;}const channel=e.target.closest('[data-channel]');if(channel){selected.channel=new Set([channel.dataset.channel]);page=1;render();return;}const group=e.target.closest('[data-group-filter]');if(group){selected[group.dataset.groupFilter]=new Set([group.dataset.groupId]);page=1;showTab('products');render();return;}const b=e.target.closest('[data-shop]');if(b){selected.shop=new Set([String(b.dataset.shop)]);page=1;showTab('products');render();}});
 $('granularity').onchange=renderTrend;$('trend-metric').onchange=renderTrend;$('product-search').oninput=()=>{page=1;renderProducts();};$('product-sort').onchange=()=>{page=1;renderProducts();};$('prev').onclick=()=>{page--;renderProducts();};$('next').onclick=()=>{page++;renderProducts();};
 $('series-search').oninput=renderSeries;$('series-sort').onchange=renderSeries;$('region-sort').onchange=renderRegions;
+$('series-trend-search').oninput=renderSeriesTrendPicker;
+$('series-trend-options').onchange=e=>{const input=e.target.closest('[data-series-trend-option]');if(!input)return;seriesTrendManual=true;input.checked?seriesTrendSelection.add(input.value):seriesTrendSelection.delete(input.value);renderSeriesWeeklyTrend();};
+$('series-trend-select-visible').onclick=()=>{const q=$('series-trend-search').value.trim().toLowerCase();seriesTrendManual=true;for(const name of seriesTrendChoices())if(name.toLowerCase().includes(q))seriesTrendSelection.add(name);renderSeriesWeeklyTrend();};
+$('series-trend-clear').onclick=()=>{seriesTrendManual=true;seriesTrendSelection.clear();renderSeriesWeeklyTrend();};
+$('series-trend-reset').onclick=()=>{seriesTrendManual=false;$('series-trend-search').value='';renderSeriesWeeklyTrend();};
+$('series-trend-chips').onclick=e=>{const button=e.target.closest('[data-series-trend-remove]');if(!button)return;seriesTrendManual=true;seriesTrendSelection.delete(button.dataset.seriesTrendRemove);renderSeriesWeeklyTrend();};
+$('series-trend-export').onclick=exportSeriesWeeklyCSV;
+const inspectSeriesWeek=e=>{const el=e.target.closest('[data-trend-week]');if(el&&el.dataset.trendWeek!==seriesTrendWeek)renderSeriesWeeklyDetail(el.dataset.trendWeek);};
+$('series-weekly-chart').addEventListener('pointerover',inspectSeriesWeek);$('series-weekly-chart').addEventListener('focusin',inspectSeriesWeek);$('series-weekly-chart').addEventListener('click',inspectSeriesWeek);$('series-weekly-table').addEventListener('click',inspectSeriesWeek);
+$('series-weekly-chart').addEventListener('keydown',e=>{if((e.key==='Enter'||e.key===' ')&&e.target.hasAttribute('data-trend-week')){e.preventDefault();inspectSeriesWeek(e);}});
+document.addEventListener('click',e=>{if(!$('series-trend-picker').contains(e.target))$('series-trend-picker').open=false;});
+document.addEventListener('keydown',e=>{if(e.key==='Escape'&&$('series-trend-picker').open){$('series-trend-picker').open=false;$('series-trend-picker').querySelector('summary').focus();}});
 $('region-tree').addEventListener('toggle',e=>{const k=e.target.dataset.regionKey;if(k)e.target.open?regionOpen.add(k):regionOpen.delete(k);},true);
 $('compare-mode').onchange=()=>{$('compare-search').value='';renderComparison();};$('compare-search').oninput=renderComparison;$('compare-product').onchange=renderComparison;
 $('sku-series-search').oninput=()=>{renderMatrixSeriesPicker();$('sku-series-picker').open=true;};$('sku-series-options').onchange=e=>{const input=e.target.closest('[data-matrix-series-option]');if(!input)return;input.checked?matrixSeriesSelection.add(input.value):matrixSeriesSelection.delete(input.value);matrixSeriesInitialized=true;matrixCell=null;renderSKUAnalysis();};
@@ -421,4 +509,4 @@ $('basket-reset').onclick=()=>{basketPair=['行李箱','行李箱'];basketPage=1
 document.addEventListener('click',e=>{const button=e.target.closest('[data-basket-left]');if(button){basketPair=[button.dataset.basketLeft,button.dataset.basketRight];basketPage=1;renderBasketAnalysis();if(!$('basket-sku-panel').hidden)$('basket-sku-panel').scrollIntoView({block:'start'});}});
 document.addEventListener('keydown',e=>{if(e.key==='Escape'&&$('sku-series-picker').open){$('sku-series-picker').open=false;$('sku-series-picker').querySelector('summary').focus();}});
 load();setInterval(()=>{if(document.visibilityState==='visible')load();},60000);document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='visible')load();});
-window.dashboardState=()=>({data,selected,filtered,totals:filtered.length?sum(filtered):null,tab,productRows,shopRows,seriesRows,regionRows,compareRows,channelRows,skuMatrix,skuMatrices,matrixCell,matrixSeriesSelection,basketAnalysis,basketPair,basketVisibleRows,basketRankingRows,basketBasis});
+window.dashboardState=()=>({data,selected,filtered,totals:filtered.length?sum(filtered):null,tab,productRows,shopRows,seriesRows,seriesWeeklyTrend,seriesTrendSelection,seriesTrendManual,seriesTrendWeek,regionRows,compareRows,channelRows,skuMatrix,skuMatrices,matrixCell,matrixSeriesSelection,basketAnalysis,basketPair,basketVisibleRows,basketRankingRows,basketBasis});
